@@ -506,4 +506,4 @@ mod imp {
     }
 }
 
-pub use imp::new_collector;
+pub use imp::{HostCollector, new_collector};
