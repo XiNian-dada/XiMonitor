@@ -114,8 +114,9 @@ cargo run -p ximonitor-server -- \
 
 注意：
 
-- `/`、`/nodes/*`、`/api/*` 和安装脚本默认受 HTTP Basic Auth 保护
-- `issue-node` 打印的安装命令会自动带上 `curl --user ...`，这样子机可以安全地取到安装脚本
+- `/`、`/nodes/*`、`/api/*` 默认受 HTTP Basic Auth 保护
+- 安装脚本本身是公开静态文件；真正的节点配置通过一次性 install token 从 `/install/bootstrap` 拉取
+- `issue-node` 不会再把长期 node token 放进安装命令；它会另外打印一个短期 install token，安装器会交互式提示输入
 
 如果你需要轮换某个节点 token，可以追加 `--rotate-token`。
 
@@ -152,10 +153,8 @@ scripts/install-agent.sh
 示例：
 
 ```bash
-curl -fsSL https://monitor.example.com/install/hk-01/NODE_TOKEN/install-agent.sh | sh -s -- \
-  --server wss://monitor.example.com/ws \
-  --node-id hk-01 \
-  --token YOUR_TOKEN \
+curl -fsSL https://monitor.example.com/install/install-agent.sh | sh -s -- \
+  --bootstrap-url https://monitor.example.com/install/bootstrap \
   --base-url https://downloads.example.com/ximonitor/releases/latest/download \
   --sha256-x86_64 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
   --sha256-aarch64 abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
@@ -165,7 +164,7 @@ curl -fsSL https://monitor.example.com/install/hk-01/NODE_TOKEN/install-agent.sh
 
 - 脚本会检测架构并下载对应的 `ximonitor-agent-<target>` 二进制
 - 脚本会按当前架构校验服务端签发的 SHA-256，校验失败会直接终止
-- `issue-node` 打印出的安装链接已经是节点级安装 token，不需要再把面板 Basic Auth 凭据拼进 `curl`
+- 安装时会提示输入一次性 install token；长期 node token 只通过 bootstrap 响应体下发，不出现在 URL 或命令参数里
 - 会创建 `ximonitor-agent` 专用系统用户，并以该用户运行 systemd service
 - 会写入 `/etc/ximonitor/agent.toml`，并将目录/文件权限收紧到仅 root 与该服务用户可读
 - 会生成 `ximonitor-agent.service`
@@ -175,16 +174,17 @@ curl -fsSL https://monitor.example.com/install/hk-01/NODE_TOKEN/install-agent.sh
 
 ```bash
 sh scripts/install-agent.sh \
-  --server wss://monitor.example.com/ws \
-  --node-id hk-01 \
-  --token YOUR_TOKEN \
+  --bootstrap-url https://monitor.example.com/install/bootstrap \
+  --install-token-file /root/ximonitor-install.token \
+  --sha256-x86_64 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --sha256-aarch64 abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 \
   --binary-url https://your-host/releases/ximonitor-agent-x86_64-unknown-linux-musl
 ```
 
 ## 说明
 
 - 网页端默认只读，不提供写配置入口。
-- `/healthz` 和 `/ws` 不走只读面板鉴权；面板和 JSON API 走 HTTP Basic Auth；安装脚本改为节点级 token URL。
+- `/healthz` 和 `/ws` 不走只读面板鉴权；面板和 JSON API 走 HTTP Basic Auth；安装脚本和 bootstrap 接口使用独立安装流程。
 - agent 只接受服务端 `server.json` 中已登记节点的逐节点 token。
 - 首版 agent 只支持 Linux。
 - 当前历史图保存基础趋势，不做长期归档。

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use getrandom::fill as fill_random;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
@@ -26,6 +26,14 @@ pub struct RegisteredNode {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstallSession {
+    pub token: String,
+    pub node_id: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NodeRegistry {
     path: Arc<PathBuf>,
@@ -35,6 +43,7 @@ pub struct NodeRegistry {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct RegistryState {
     entries: HashMap<String, RegisteredNode>,
+    install_sessions: HashMap<String, InstallSession>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +59,8 @@ pub struct IssueNodeResult {
     pub node: RegisteredNode,
     pub created: bool,
     pub rotated_token: bool,
+    pub install_token: String,
+    pub install_token_expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -57,15 +68,19 @@ pub struct IssueNodeResult {
 struct RegistryFile {
     #[serde(default)]
     nodes: Vec<RegisteredNode>,
+    #[serde(default)]
+    install_sessions: Vec<InstallSession>,
 }
+
+const INSTALL_TOKEN_TTL_MINUTES: i64 = 15;
 
 impl NodeRegistry {
     pub async fn load(path: &Path) -> Result<Self> {
-        let entries = load_registry_entries(path).await?;
+        let state = load_registry_state(path).await?;
 
         Ok(Self {
             path: Arc::new(path.to_path_buf()),
-            state: Arc::new(RwLock::new(RegistryState { entries })),
+            state: Arc::new(RwLock::new(state)),
         })
     }
 
@@ -82,13 +97,13 @@ impl NodeRegistry {
     }
 
     pub async fn reload(&self) -> Result<bool> {
-        let entries = load_registry_entries(self.path.as_path()).await?;
+        let next_state = load_registry_state(self.path.as_path()).await?;
         let mut state = self.state.write().await;
-        if state.entries == entries {
+        if *state == next_state {
             return Ok(false);
         }
 
-        state.entries = entries;
+        *state = next_state;
         Ok(true)
     }
 
@@ -97,8 +112,43 @@ impl NodeRegistry {
         state.entries.len()
     }
 
+    pub async fn consume_install_token(&self, token: &str) -> Result<Option<RegisteredNode>> {
+        validate_non_empty("install token", token)?;
+
+        let mut file = load_registry_file(self.path.as_path()).await?;
+        let pruned = prune_expired_install_sessions(&mut file, Utc::now());
+        let Some(index) = file
+            .install_sessions
+            .iter()
+            .position(|session| session.token == token)
+        else {
+            if pruned {
+                save_registry_file(self.path.as_path(), &file).await?;
+                self.replace_state_from_file(file).await?;
+            }
+            return Ok(None);
+        };
+
+        let session = file.install_sessions.remove(index);
+        let node = file
+            .nodes
+            .iter()
+            .find(|node| node.node_id == session.node_id)
+            .cloned();
+        save_registry_file(self.path.as_path(), &file).await?;
+        self.replace_state_from_file(file).await?;
+        Ok(node)
+    }
+
     pub fn path(&self) -> &Path {
         self.path.as_path()
+    }
+
+    async fn replace_state_from_file(&self, file: RegistryFile) -> Result<()> {
+        let state = registry_state_from_file(self.path.as_path(), file)?;
+        let mut guard = self.state.write().await;
+        *guard = state;
+        Ok(())
     }
 }
 
@@ -109,8 +159,9 @@ pub async fn issue_node(path: &Path, request: IssueNodeRequest) -> Result<IssueN
     }
 
     let mut file = load_registry_file(path).await?;
-    let mut rotated_token = false;
     let now = Utc::now();
+    prune_expired_install_sessions(&mut file, now);
+    let mut rotated_token = false;
 
     if let Some(index) = file
         .nodes
@@ -130,11 +181,14 @@ pub async fn issue_node(path: &Path, request: IssueNodeRequest) -> Result<IssueN
 
         validate_registered_node(&file.nodes[index])?;
         let node = file.nodes[index].clone();
+        let install_session = mint_install_session(&mut file, &node.node_id, now)?;
         save_registry_file(path, &file).await?;
         return Ok(IssueNodeResult {
             node,
             created: false,
             rotated_token,
+            install_token: install_session.token,
+            install_token_expires_at: install_session.expires_at,
         });
     }
 
@@ -156,12 +210,15 @@ pub async fn issue_node(path: &Path, request: IssueNodeRequest) -> Result<IssueN
     file.nodes.push(node.clone());
     file.nodes
         .sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    let install_session = mint_install_session(&mut file, &node.node_id, now)?;
     save_registry_file(path, &file).await?;
 
     Ok(IssueNodeResult {
         node,
         created: true,
         rotated_token,
+        install_token: install_session.token,
+        install_token_expires_at: install_session.expires_at,
     })
 }
 
@@ -181,13 +238,19 @@ pub fn build_agent_server_url(public_base_url: &str) -> Result<String> {
     Ok(url.into())
 }
 
-pub fn build_install_script_url(public_base_url: &str, node: &RegisteredNode) -> Result<String> {
+pub fn build_install_script_url(public_base_url: &str) -> Result<String> {
     let mut url = Url::parse(public_base_url)
         .with_context(|| "invalid server.public_base_url".to_string())?;
-    url.set_path(&format!(
-        "/install/{}/{}/install-agent.sh",
-        node.node_id, node.token
-    ));
+    url.set_path("/install/install-agent.sh");
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.into())
+}
+
+pub fn build_install_bootstrap_url(public_base_url: &str) -> Result<String> {
+    let mut url = Url::parse(public_base_url)
+        .with_context(|| "invalid server.public_base_url".to_string())?;
+    url.set_path("/install/bootstrap");
     url.set_query(None);
     url.set_fragment(None);
     Ok(url.into())
@@ -195,19 +258,15 @@ pub fn build_install_script_url(public_base_url: &str, node: &RegisteredNode) ->
 
 pub fn render_install_command(
     public_base_url: &str,
-    node: &RegisteredNode,
     agent_release_base_url: Option<&str>,
     agent_release_sha256_x86_64: Option<&str>,
     agent_release_sha256_aarch64: Option<&str>,
 ) -> Result<String> {
-    let script_url = build_install_script_url(public_base_url, node)?;
-    let server_url = build_agent_server_url(public_base_url)?;
+    let script_url = build_install_script_url(public_base_url)?;
+    let bootstrap_url = build_install_bootstrap_url(public_base_url)?;
     let mut lines = vec![
         format!("curl -fsSL {} | sh -s -- \\", shell_quote(&script_url)),
-        format!("  --server {} \\", shell_quote(&server_url)),
-        format!("  --node-id {} \\", shell_quote(&node.node_id)),
-        format!("  --node-label {} \\", shell_quote(&node.node_label)),
-        format!("  --token {}", shell_quote(&node.token)),
+        format!("  --bootstrap-url {}", shell_quote(&bootstrap_url)),
     ];
 
     if let Some(agent_release_base_url) = agent_release_base_url {
@@ -217,6 +276,7 @@ pub fn render_install_command(
         let Some(agent_release_sha256_aarch64) = agent_release_sha256_aarch64 else {
             bail!("missing aarch64 agent checksum for install command");
         };
+        lines[1].push_str(" \\");
         lines.push(format!(
             "  --base-url {} \\",
             shell_quote(agent_release_base_url)
@@ -276,15 +336,33 @@ async fn load_registry_file(path: &Path) -> Result<RegistryFile> {
     Ok(file)
 }
 
-async fn load_registry_entries(path: &Path) -> Result<HashMap<String, RegisteredNode>> {
-    let file = load_registry_file(path).await?;
+async fn load_registry_state(path: &Path) -> Result<RegistryState> {
+    let mut file = load_registry_file(path).await?;
+    prune_expired_install_sessions(&mut file, Utc::now());
+    registry_state_from_file(path, file)
+}
+
+fn registry_state_from_file(path: &Path, file: RegistryFile) -> Result<RegistryState> {
     let mut entries = HashMap::with_capacity(file.nodes.len());
     for node in file.nodes {
         if entries.insert(node.node_id.clone(), node).is_some() {
             bail!("duplicate node_id found in {}", path.display());
         }
     }
-    Ok(entries)
+    let mut install_sessions = HashMap::with_capacity(file.install_sessions.len());
+    for session in file.install_sessions {
+        if install_sessions
+            .insert(session.token.clone(), session)
+            .is_some()
+        {
+            bail!("duplicate install token found in {}", path.display());
+        }
+    }
+
+    Ok(RegistryState {
+        entries,
+        install_sessions,
+    })
 }
 
 async fn save_registry_file(path: &Path, file: &RegistryFile) -> Result<()> {
@@ -349,11 +427,28 @@ fn harden_registry_permissions(path: &Path) -> Result<()> {
 }
 
 fn validate_registry_file(path: &Path, file: &RegistryFile) -> Result<()> {
-    let mut seen = HashMap::with_capacity(file.nodes.len());
+    let mut seen_nodes = HashMap::with_capacity(file.nodes.len());
     for node in &file.nodes {
         validate_registered_node(node)?;
-        if seen.insert(node.node_id.as_str(), ()).is_some() {
+        if seen_nodes.insert(node.node_id.as_str(), ()).is_some() {
             bail!("duplicate node_id {} in {}", node.node_id, path.display());
+        }
+    }
+    let mut seen_install_tokens = HashMap::with_capacity(file.install_sessions.len());
+    for session in &file.install_sessions {
+        validate_install_session(session)?;
+        if !seen_nodes.contains_key(session.node_id.as_str()) {
+            bail!(
+                "install token for unknown node_id {} in {}",
+                session.node_id,
+                path.display()
+            );
+        }
+        if seen_install_tokens
+            .insert(session.token.as_str(), ())
+            .is_some()
+        {
+            bail!("duplicate install token in {}", path.display());
         }
     }
     Ok(())
@@ -364,6 +459,36 @@ fn validate_registered_node(node: &RegisteredNode) -> Result<()> {
     validate_non_empty("node.node_label", &node.node_label)?;
     validate_non_empty("node.token", &node.token)?;
     Ok(())
+}
+
+fn validate_install_session(session: &InstallSession) -> Result<()> {
+    validate_non_empty("install_session.token", &session.token)?;
+    validate_identifier("install_session.node_id", &session.node_id)?;
+    Ok(())
+}
+
+fn prune_expired_install_sessions(file: &mut RegistryFile, now: DateTime<Utc>) -> bool {
+    let original_len = file.install_sessions.len();
+    file.install_sessions
+        .retain(|session| session.expires_at > now);
+    original_len != file.install_sessions.len()
+}
+
+fn mint_install_session(
+    file: &mut RegistryFile,
+    node_id: &str,
+    now: DateTime<Utc>,
+) -> Result<InstallSession> {
+    file.install_sessions
+        .retain(|session| session.node_id != node_id);
+    let session = InstallSession {
+        token: generate_token()?,
+        node_id: node_id.to_string(),
+        created_at: now,
+        expires_at: now + ChronoDuration::minutes(INSTALL_TOKEN_TTL_MINUTES),
+    };
+    file.install_sessions.push(session.clone());
+    Ok(session)
 }
 
 fn authorize_identity(
@@ -498,6 +623,7 @@ mod tests {
                     tags: vec!["edge".to_string()],
                     created_at: Utc::now(),
                 }],
+                install_sessions: Vec::new(),
             };
             std::fs::write(&path, serde_json::to_string_pretty(&file).expect("json"))
                 .expect("registry should be written");
@@ -557,19 +683,21 @@ mod tests {
             let parsed: RegistryFile =
                 serde_json::from_str(&stored).expect("stored registry should parse");
             assert_eq!(parsed.nodes.len(), 1);
+            assert_eq!(parsed.install_sessions.len(), 1);
+            assert_eq!(parsed.install_sessions[0].token, issued.install_token);
 
             let command = render_install_command(
                 "https://monitor.example.com",
-                &issued.node,
                 Some("https://downloads.example.com/releases/latest/download"),
                 Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
                 Some("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
             )
             .expect("install command should render");
-            assert!(command.contains("--token"));
-            assert!(command.contains("/hk-01/"));
+            assert!(command.contains("--bootstrap-url"));
             assert!(command.contains("/install-agent.sh"));
             assert!(command.contains("--sha256-x86_64"));
+            assert!(!command.contains(&issued.node.token));
+            assert!(!command.contains(&issued.install_token));
 
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_dir(&temp_dir);
@@ -623,6 +751,54 @@ mod tests {
                 registry
                     .is_token_current("hk-01", &rotated.node.token)
                     .await
+            );
+
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_dir(&temp_dir);
+        });
+    }
+
+    #[test]
+    fn install_tokens_are_one_time_use() {
+        let runtime = Runtime::new().expect("runtime should build");
+        runtime.block_on(async {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be monotonic enough")
+                .as_nanos();
+            let temp_dir =
+                std::env::temp_dir().join(format!("ximonitor-install-token-test-{unique}"));
+            std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+            let path = temp_dir.join("server.json");
+
+            let issued = issue_node(
+                &path,
+                IssueNodeRequest {
+                    node_id: "hk-01".to_string(),
+                    node_label: Some("Hong Kong 01".to_string()),
+                    tags: Vec::new(),
+                    rotate_token: false,
+                },
+            )
+            .await
+            .expect("node should be issued");
+            let registry = NodeRegistry::load(&path)
+                .await
+                .expect("registry should load");
+
+            let consumed = registry
+                .consume_install_token(&issued.install_token)
+                .await
+                .expect("install token should be consumable")
+                .expect("install token should resolve to a node");
+            assert_eq!(consumed.node_id, issued.node.node_id);
+            assert_eq!(consumed.token, issued.node.token);
+            assert!(
+                registry
+                    .consume_install_token(&issued.install_token)
+                    .await
+                    .expect("second install token lookup should succeed")
+                    .is_none()
             );
 
             let _ = std::fs::remove_file(&path);

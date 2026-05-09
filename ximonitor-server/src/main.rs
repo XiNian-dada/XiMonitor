@@ -200,10 +200,8 @@ async fn run_server(config_path: &Path) -> Result<()> {
         ));
     let app = Router::new()
         .route("/healthz", get(healthz))
-        .route(
-            "/install/{node_id}/{token}/install-agent.sh",
-            get(install_agent_script),
-        )
+        .route("/install/install-agent.sh", get(install_agent_script))
+        .route("/install/bootstrap", get(install_bootstrap))
         .route("/ws", get(ws_handler))
         .merge(protected_routes)
         .with_state(state)
@@ -240,13 +238,12 @@ async fn issue_node_command(config_path: &Path, args: IssueNodeArgs) -> Result<(
 
     let install_command = render_install_command(
         &config.public_base_url,
-        &issued.node,
         config.agent_release_base_url.as_deref(),
         config.agent_release_sha256_x86_64.as_deref(),
         config.agent_release_sha256_aarch64.as_deref(),
     )?;
     let agent_config = render_agent_config(&config.public_base_url, &issued.node)?;
-    let install_script_url = build_install_script_url(&config.public_base_url, &issued.node)?;
+    let install_script_url = build_install_script_url(&config.public_base_url)?;
     let action = if issued.created {
         "created"
     } else if issued.rotated_token {
@@ -260,11 +257,18 @@ async fn issue_node_command(config_path: &Path, args: IssueNodeArgs) -> Result<(
     println!("status: {action}");
     println!("registry_path: {}", config.node_registry_path.display());
     println!("install_script_url: {install_script_url}");
+    println!("install_token: {}", issued.install_token);
+    println!(
+        "install_token_expires_at: {}",
+        issued.install_token_expires_at.to_rfc3339()
+    );
     println!();
     println!("# agent.toml");
     println!("{agent_config}");
     println!("# install command");
     println!("{install_command}");
+    println!();
+    println!("note: the installer will prompt for the one-time install token shown above.");
 
     if config.agent_release_base_url.is_none() {
         println!();
@@ -350,19 +354,65 @@ async fn bootstrap(State(state): State<AppState>) -> impl IntoResponse {
     })
 }
 
-async fn install_agent_script(
-    State(state): State<AppState>,
-    AxumPath((node_id, token)): AxumPath<(String, String)>,
-) -> Response {
-    if !state.registry.is_token_current(&node_id, &token).await {
-        return (StatusCode::UNAUTHORIZED, "invalid install token").into_response();
-    }
-
+async fn install_agent_script() -> Response {
     (
         [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
         INSTALL_AGENT_SCRIPT,
     )
         .into_response()
+}
+
+async fn install_bootstrap(State(state): State<AppState>, request: Request) -> Response {
+    let Some(token) = bearer_token_from_request(&request) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(
+                header::WWW_AUTHENTICATE,
+                "Bearer realm=\"XiMonitor Installer\"",
+            )],
+            "missing install token",
+        )
+            .into_response();
+    };
+
+    let node = match state.registry.consume_install_token(token).await {
+        Ok(Some(node)) => node,
+        Ok(None) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(
+                    header::WWW_AUTHENTICATE,
+                    "Bearer realm=\"XiMonitor Installer\"",
+                )],
+                "invalid install token",
+            )
+                .into_response();
+        }
+        Err(error) => {
+            error!(error = ?error, "failed to consume install token");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to prepare agent bootstrap",
+            )
+                .into_response();
+        }
+    };
+
+    match render_agent_config(&state.shared.config().public_base_url, &node) {
+        Ok(agent_config) => (
+            [(header::CONTENT_TYPE, "application/toml; charset=utf-8")],
+            agent_config,
+        )
+            .into_response(),
+        Err(error) => {
+            error!(error = ?error, "failed to render agent bootstrap config");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to render agent bootstrap config",
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn overview(State(state): State<AppState>) -> impl IntoResponse {
@@ -629,6 +679,16 @@ fn spawn_registry_reloader(registry: NodeRegistry) {
     });
 }
 
+fn bearer_token_from_request(request: &Request) -> Option<&str> {
+    request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 fn spawn_insecure_transport_warning(public_base_url: String, listen: std::net::SocketAddr) {
     if !uses_insecure_remote_public_base_url(&public_base_url, listen) {
         return;
@@ -743,9 +803,9 @@ mod tests {
     use tokio::runtime::Runtime;
 
     use super::{
-        AppState, ReadonlyRouteAuth, bootstrap, healthz, index, install_agent_script, node_detail,
-        node_history, node_status, nodes, overview, uses_insecure_remote_public_base_url,
-        ws_handler,
+        AppState, ReadonlyRouteAuth, bootstrap, healthz, index, install_agent_script,
+        install_bootstrap, node_detail, node_history, node_status, nodes, overview,
+        uses_insecure_remote_public_base_url, ws_handler,
     };
     use crate::history::HistoryStore;
     use crate::registry::NodeRegistry;
@@ -791,10 +851,8 @@ mod tests {
             .route("/", get(index))
             .route("/nodes/{node_id}", get(node_detail))
             .route("/healthz", get(healthz))
-            .route(
-                "/install/{node_id}/{token}/install-agent.sh",
-                get(install_agent_script),
-            )
+            .route("/install/install-agent.sh", get(install_agent_script))
+            .route("/install/bootstrap", get(install_bootstrap))
             .route("/api/bootstrap", get(bootstrap))
             .route("/api/overview", get(overview))
             .route("/api/nodes", get(nodes))

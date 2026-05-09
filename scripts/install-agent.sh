@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+umask 077
 
 fail() {
   printf '%s\n' "install-agent: $*" >&2
@@ -10,14 +11,9 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
-toml_escape() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
-}
-
-SERVER=""
-NODE_ID=""
-NODE_LABEL=""
-TOKEN=""
+BOOTSTRAP_URL=""
+INSTALL_TOKEN="${XIMONITOR_AGENT_INSTALL_TOKEN:-}"
+INSTALL_TOKEN_FILE="${XIMONITOR_AGENT_INSTALL_TOKEN_FILE:-}"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/ximonitor"
 BASE_URL="${XIMONITOR_AGENT_BASE_URL:-https://example.invalid/ximonitor/releases/latest/download}"
@@ -27,6 +23,20 @@ SHA256_AARCH64="${XIMONITOR_AGENT_SHA256_AARCH64:-}"
 SERVICE_USER="ximonitor-agent"
 SERVICE_GROUP="ximonitor-agent"
 STATE_DIR="/var/lib/ximonitor-agent"
+BIN_PATH=""
+CONFIG_PATH=""
+UNIT_PATH="/etc/systemd/system/ximonitor-agent.service"
+TMP_PATH=""
+BOOTSTRAP_TMP=""
+CURL_AUTH_CONFIG=""
+
+cleanup() {
+  [ -n "$TMP_PATH" ] && rm -f "$TMP_PATH"
+  [ -n "$BOOTSTRAP_TMP" ] && rm -f "$BOOTSTRAP_TMP"
+  [ -n "$CURL_AUTH_CONFIG" ] && rm -f "$CURL_AUTH_CONFIG"
+}
+
+trap cleanup EXIT HUP INT TERM
 
 calculate_sha256() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -86,26 +96,64 @@ ensure_service_account() {
   fail "missing required command: useradd or adduser"
 }
 
+prompt_install_token() {
+  need_cmd stty
+  [ -r /dev/tty ] || fail "missing install token and no interactive terminal is available"
+
+  old_tty_state="$(stty -g </dev/tty)" || fail "failed to inspect terminal state"
+  trap 'stty "$old_tty_state" </dev/tty; cleanup' EXIT HUP INT TERM
+  printf '%s' "One-time install token: " >/dev/tty
+  stty -echo </dev/tty || fail "failed to disable terminal echo"
+  IFS= read -r INSTALL_TOKEN </dev/tty || fail "failed to read install token"
+  stty "$old_tty_state" </dev/tty || fail "failed to restore terminal state"
+  trap cleanup EXIT HUP INT TERM
+  printf '\n' >/dev/tty
+}
+
+load_install_token() {
+  if [ -n "$INSTALL_TOKEN_FILE" ]; then
+    [ -r "$INSTALL_TOKEN_FILE" ] || fail "install token file is not readable: $INSTALL_TOKEN_FILE"
+    INSTALL_TOKEN="$(sed -n '1p' "$INSTALL_TOKEN_FILE")"
+  elif [ -z "$INSTALL_TOKEN" ]; then
+    prompt_install_token
+  fi
+
+  [ -n "$INSTALL_TOKEN" ] || fail "install token must not be empty"
+}
+
+write_curl_auth_config() {
+  cat >"$CURL_AUTH_CONFIG" <<EOF
+header = "Authorization: Bearer $INSTALL_TOKEN"
+EOF
+  chmod 0600 "$CURL_AUTH_CONFIG"
+}
+
+fetch_bootstrap_config() {
+  [ -n "$BOOTSTRAP_URL" ] || fail "missing --bootstrap-url"
+  load_install_token
+  write_curl_auth_config
+  printf '%s\n' "Fetching agent bootstrap from $BOOTSTRAP_URL"
+  curl -fsSL --config "$CURL_AUTH_CONFIG" "$BOOTSTRAP_URL" -o "$BOOTSTRAP_TMP" \
+    || fail "failed to fetch agent bootstrap config"
+  grep -q '^\[agent\]$' "$BOOTSTRAP_TMP" || fail "bootstrap response did not contain an agent config"
+  grep -q '^token = "' "$BOOTSTRAP_TMP" || fail "bootstrap response did not contain an agent token"
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --server)
-      [ "$#" -ge 2 ] || fail "--server requires a value"
-      SERVER="$2"
+    --bootstrap-url)
+      [ "$#" -ge 2 ] || fail "--bootstrap-url requires a value"
+      BOOTSTRAP_URL="$2"
       shift 2
       ;;
-    --node-id)
-      [ "$#" -ge 2 ] || fail "--node-id requires a value"
-      NODE_ID="$2"
+    --install-token)
+      [ "$#" -ge 2 ] || fail "--install-token requires a value"
+      INSTALL_TOKEN="$2"
       shift 2
       ;;
-    --node-label)
-      [ "$#" -ge 2 ] || fail "--node-label requires a value"
-      NODE_LABEL="$2"
-      shift 2
-      ;;
-    --token)
-      [ "$#" -ge 2 ] || fail "--token requires a value"
-      TOKEN="$2"
+    --install-token-file)
+      [ "$#" -ge 2 ] || fail "--install-token-file requires a value"
+      INSTALL_TOKEN_FILE="$2"
       shift 2
       ;;
     --install-dir)
@@ -142,14 +190,13 @@ while [ "$#" -gt 0 ]; do
       cat <<'EOF'
 Usage:
   sh install-agent.sh \
-    --server wss://monitor.example.com/ws \
-    --node-id hk-01 \
-    --token YOUR_TOKEN \
+    --bootstrap-url https://monitor.example.com/install/bootstrap \
     --sha256-x86_64 <sha256> \
     --sha256-aarch64 <sha256>
 
 Optional:
-  --node-label <label>
+  --install-token <one-time-token>
+  --install-token-file <path>
   --install-dir <dir>
   --config-dir <dir>
   --base-url <release-base-url>
@@ -164,20 +211,18 @@ EOF
 done
 
 [ "$(id -u)" -eq 0 ] || fail "please run as root"
-[ -n "$SERVER" ] || fail "missing --server"
-[ -n "$NODE_ID" ] || fail "missing --node-id"
-[ -n "$TOKEN" ] || fail "missing --token"
-
-if [ -z "$NODE_LABEL" ]; then
-  NODE_LABEL="$NODE_ID"
-fi
+[ -n "$BOOTSTRAP_URL" ] || fail "missing --bootstrap-url"
 
 need_cmd uname
 need_cmd curl
+need_cmd grep
 need_cmd id
-need_cmd sed
-need_cmd mkdir
 need_cmd install
+need_cmd mkdir
+need_cmd mktemp
+need_cmd mv
+need_cmd rm
+need_cmd sed
 need_cmd chown
 need_cmd chmod
 need_cmd systemctl
@@ -206,9 +251,7 @@ else
 fi
 
 BIN_PATH="$INSTALL_DIR/ximonitor-agent"
-TMP_PATH="$BIN_PATH.tmp"
 CONFIG_PATH="$CONFIG_DIR/agent.toml"
-UNIT_PATH="/etc/systemd/system/ximonitor-agent.service"
 
 ensure_service_account
 SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
@@ -218,24 +261,19 @@ chmod 0755 "$INSTALL_DIR"
 chown root:"$SERVICE_GROUP" "$CONFIG_DIR" "$STATE_DIR"
 chmod 0750 "$CONFIG_DIR" "$STATE_DIR"
 
+TMP_PATH="$(mktemp "$INSTALL_DIR/ximonitor-agent.XXXXXX")"
+BOOTSTRAP_TMP="$(mktemp "$CONFIG_DIR/agent.toml.XXXXXX")"
+CURL_AUTH_CONFIG="$(mktemp "$STATE_DIR/install-curl.XXXXXX")"
+
+fetch_bootstrap_config
+
 printf '%s\n' "Downloading $DOWNLOAD_URL"
 curl -fsSL "$DOWNLOAD_URL" -o "$TMP_PATH" || fail "failed to download agent binary"
 ACTUAL_SHA256="$(calculate_sha256 "$TMP_PATH")"
 [ "$ACTUAL_SHA256" = "$EXPECTED_SHA256" ] || fail "downloaded agent checksum mismatch"
-chmod 0755 "$TMP_PATH"
-mv "$TMP_PATH" "$BIN_PATH"
-chown root:root "$BIN_PATH"
 
-cat >"$CONFIG_PATH" <<EOF
-[agent]
-node_id = "$(toml_escape "$NODE_ID")"
-node_label = "$(toml_escape "$NODE_LABEL")"
-server = "$(toml_escape "$SERVER")"
-token = "$(toml_escape "$TOKEN")"
-report_interval_secs = 5
-EOF
-chown root:"$SERVICE_GROUP" "$CONFIG_PATH"
-chmod 0640 "$CONFIG_PATH"
+install -o root -g root -m 0755 "$TMP_PATH" "$BIN_PATH"
+install -o root -g "$SERVICE_GROUP" -m 0640 "$BOOTSTRAP_TMP" "$CONFIG_PATH"
 
 cat >"$UNIT_PATH" <<EOF
 [Unit]
