@@ -170,6 +170,7 @@ async fn run_server(config_path: &Path) -> Result<()> {
     history.initialize().await;
     restore_snapshot_if_available(&shared, config.snapshot_path.as_path()).await;
 
+    spawn_registry_reloader(registry.clone());
     spawn_stale_reaper(shared.clone());
     spawn_snapshot_persistor(shared.clone(), config.snapshot_path.clone());
 
@@ -180,9 +181,10 @@ async fn run_server(config_path: &Path) -> Result<()> {
         );
     }
 
+    let enrolled_nodes = registry.count().await;
     info!(
         registry_path = %config.node_registry_path.display(),
-        enrolled_nodes = registry.count(),
+        enrolled_nodes,
         "node registry loaded",
     );
 
@@ -345,7 +347,7 @@ async fn bootstrap(State(state): State<AppState>) -> impl IntoResponse {
         status: "ok",
         public_base_url: state.shared.config().public_base_url.clone(),
         refresh_interval_secs: state.shared.config().refresh_interval_secs,
-        registered_nodes: state.registry.count(),
+        registered_nodes: state.registry.count().await,
     })
 }
 
@@ -413,9 +415,11 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) -> Result<(), Pro
     )
     .await
     .map_err(|_| ProtocolError::Client("timed out waiting for hello message".to_string()))??;
+    let session_token = hello.token.clone();
     let identity = state
         .registry
-        .authorize(&hello.identity, &hello.token)
+        .authorize(&hello.identity, &session_token)
+        .await
         .map_err(|error| ProtocolError::Client(error.to_string()))?;
 
     let node_id = identity.node_id.clone();
@@ -450,6 +454,10 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) -> Result<(), Pro
                         ParsedFrame::Close => break Ok(()),
                         ParsedFrame::Control => continue,
                         ParsedFrame::Wire(WireMessage::Metrics(MetricsMessage { snapshot })) => {
+                            if !state.registry.is_token_current(&node_id, &session_token).await {
+                                warn!(node_id = %node_id, "disconnecting session after registry token change");
+                                break Ok(());
+                            }
                             let snapshot = sanitize_snapshot(shared.config(), snapshot);
                             let Some(status) = shared.update_snapshot(&node_id, session_id, snapshot).await else {
                                 warn!(node_id = %node_id, session_id, "dropping metrics from superseded session");
@@ -458,6 +466,10 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) -> Result<(), Pro
                             state.history.record_status(&status).await;
                         }
                         ParsedFrame::Wire(WireMessage::Pong(PongMessage { nonce })) => {
+                            if !state.registry.is_token_current(&node_id, &session_token).await {
+                                warn!(node_id = %node_id, "disconnecting session after registry token change");
+                                break Ok(());
+                            }
                             let Some(sent_at) = outstanding_pings.remove(&nonce) else {
                                 continue;
                             };
@@ -481,6 +493,10 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) -> Result<(), Pro
                 _ = ping_ticker.tick() => {
                     if !shared.is_current_session(&node_id, session_id).await {
                         warn!(node_id = %node_id, session_id, "closing superseded websocket session");
+                        break Ok(());
+                    }
+                    if !state.registry.is_token_current(&node_id, &session_token).await {
+                        warn!(node_id = %node_id, "closing websocket session after registry token change");
                         break Ok(());
                     }
 
@@ -569,6 +585,33 @@ fn spawn_stale_reaper(shared: SharedState) {
             let count = shared.mark_stale().await;
             if count > 0 {
                 info!(count, "marked stale nodes offline");
+            }
+        }
+    });
+}
+
+fn spawn_registry_reloader(registry: NodeRegistry) {
+    tokio::spawn(async move {
+        let mut ticker = interval(Duration::from_secs(1));
+        loop {
+            ticker.tick().await;
+            match registry.reload().await {
+                Ok(true) => {
+                    let enrolled_nodes = registry.count().await;
+                    info!(
+                        registry_path = %registry.path().display(),
+                        enrolled_nodes,
+                        "reloaded node registry",
+                    );
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    warn!(
+                        error = ?error,
+                        registry_path = %registry.path().display(),
+                        "failed to reload node registry; keeping previous in-memory snapshot",
+                    );
+                }
             }
         }
     });

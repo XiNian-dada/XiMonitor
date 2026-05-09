@@ -110,6 +110,7 @@ cargo run -p ximonitor-server -- \
 - 为该节点生成独立 token
 - 打印 `agent.toml` 片段
 - 打印一条可直接复制到子机执行的安装命令
+- 让运行中的服务端在下一次注册表轮询时自动接纳新 token，无需重启进程
 
 注意：
 

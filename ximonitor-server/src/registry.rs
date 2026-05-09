@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use getrandom::fill as fill_random;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+use tokio::sync::RwLock;
 use url::Url;
 use ximonitor_proto::{NodeIdentity, ReadonlyAuthConfig};
 
@@ -22,8 +23,14 @@ pub struct RegisteredNode {
 
 #[derive(Debug, Clone)]
 pub struct NodeRegistry {
-    entries: Arc<HashMap<String, RegisteredNode>>,
+    path: Arc<PathBuf>,
+    state: Arc<RwLock<RegistryState>>,
     legacy_shared_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RegistryState {
+    entries: HashMap<String, RegisteredNode>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,51 +57,54 @@ struct RegistryFile {
 
 impl NodeRegistry {
     pub async fn load(path: &Path, legacy_shared_token: Option<String>) -> Result<Self> {
-        let file = load_registry_file(path).await?;
-        let mut entries = HashMap::with_capacity(file.nodes.len());
-        for node in file.nodes {
-            if entries.insert(node.node_id.clone(), node).is_some() {
-                bail!("duplicate node_id found in {}", path.display());
-            }
-        }
+        let entries = load_registry_entries(path).await?;
 
         Ok(Self {
-            entries: Arc::new(entries),
+            path: Arc::new(path.to_path_buf()),
+            state: Arc::new(RwLock::new(RegistryState { entries })),
             legacy_shared_token,
         })
     }
 
-    pub fn authorize(&self, identity: &NodeIdentity, token: &str) -> Result<NodeIdentity> {
+    pub async fn authorize(&self, identity: &NodeIdentity, token: &str) -> Result<NodeIdentity> {
         validate_runtime_identity(identity)?;
         validate_non_empty("hello.token", token)?;
-
-        if let Some(entry) = self.entries.get(identity.node_id.as_str()) {
-            if token != entry.token {
-                bail!("invalid token for enrolled node {}", entry.node_id);
-            }
-
-            let mut identity = identity.clone();
-            identity.node_id = entry.node_id.clone();
-            identity.node_label = entry.node_label.clone();
-            identity.tags = entry.tags.clone();
-            return Ok(identity);
-        }
-
-        if let Some(shared_token) = self.legacy_shared_token.as_deref() {
-            if token == shared_token {
-                return Ok(identity.clone());
-            }
-        }
-
-        bail!("node {} is not enrolled", identity.node_id);
+        let state = self.state.read().await;
+        authorize_identity(&state.entries, self.legacy_shared_token.as_deref(), identity, token)
     }
 
-    pub fn count(&self) -> usize {
-        self.entries.len()
+    pub async fn is_token_current(&self, node_id: &str, token: &str) -> bool {
+        let state = self.state.read().await;
+        is_token_current(
+            &state.entries,
+            self.legacy_shared_token.as_deref(),
+            node_id,
+            token,
+        )
+    }
+
+    pub async fn reload(&self) -> Result<bool> {
+        let entries = load_registry_entries(self.path.as_path()).await?;
+        let mut state = self.state.write().await;
+        if state.entries == entries {
+            return Ok(false);
+        }
+
+        state.entries = entries;
+        Ok(true)
+    }
+
+    pub async fn count(&self) -> usize {
+        let state = self.state.read().await;
+        state.entries.len()
     }
 
     pub fn uses_legacy_shared_token(&self) -> bool {
         self.legacy_shared_token.is_some()
+    }
+
+    pub fn path(&self) -> &Path {
+        self.path.as_path()
     }
 }
 
@@ -267,6 +277,17 @@ async fn load_registry_file(path: &Path) -> Result<RegistryFile> {
     Ok(file)
 }
 
+async fn load_registry_entries(path: &Path) -> Result<HashMap<String, RegisteredNode>> {
+    let file = load_registry_file(path).await?;
+    let mut entries = HashMap::with_capacity(file.nodes.len());
+    for node in file.nodes {
+        if entries.insert(node.node_id.clone(), node).is_some() {
+            bail!("duplicate node_id found in {}", path.display());
+        }
+    }
+    Ok(entries)
+}
+
 async fn save_registry_file(path: &Path, file: &RegistryFile) -> Result<()> {
     validate_registry_file(path, file)?;
 
@@ -314,6 +335,46 @@ fn validate_registered_node(node: &RegisteredNode) -> Result<()> {
     validate_non_empty("node.node_label", &node.node_label)?;
     validate_non_empty("node.token", &node.token)?;
     Ok(())
+}
+
+fn authorize_identity(
+    entries: &HashMap<String, RegisteredNode>,
+    legacy_shared_token: Option<&str>,
+    identity: &NodeIdentity,
+    token: &str,
+) -> Result<NodeIdentity> {
+    if let Some(entry) = entries.get(identity.node_id.as_str()) {
+        if token != entry.token {
+            bail!("invalid token for enrolled node {}", entry.node_id);
+        }
+
+        let mut identity = identity.clone();
+        identity.node_id = entry.node_id.clone();
+        identity.node_label = entry.node_label.clone();
+        identity.tags = entry.tags.clone();
+        return Ok(identity);
+    }
+
+    if let Some(shared_token) = legacy_shared_token {
+        if token == shared_token {
+            return Ok(identity.clone());
+        }
+    }
+
+    bail!("node {} is not enrolled", identity.node_id);
+}
+
+fn is_token_current(
+    entries: &HashMap<String, RegisteredNode>,
+    legacy_shared_token: Option<&str>,
+    node_id: &str,
+    token: &str,
+) -> bool {
+    if let Some(entry) = entries.get(node_id) {
+        return token == entry.token;
+    }
+
+    legacy_shared_token == Some(token)
 }
 
 fn validate_runtime_identity(identity: &NodeIdentity) -> Result<()> {
@@ -402,37 +463,53 @@ mod tests {
 
     #[test]
     fn registry_authorizes_per_node_token_and_overrides_metadata() {
-        let registry = NodeRegistry {
-            entries: std::sync::Arc::new(std::collections::HashMap::from([(
-                "osaka-01".to_string(),
-                RegisteredNode {
+        let runtime = Runtime::new().expect("runtime should build");
+        runtime.block_on(async {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be monotonic enough")
+                .as_nanos();
+            let temp_dir =
+                std::env::temp_dir().join(format!("ximonitor-registry-auth-test-{unique}"));
+            std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+            let path = temp_dir.join("server.json");
+            let file = RegistryFile {
+                nodes: vec![RegisteredNode {
                     node_id: "osaka-01".to_string(),
                     node_label: "Osaka 01".to_string(),
                     token: "secret".to_string(),
                     tags: vec!["edge".to_string()],
                     created_at: Utc::now(),
-                },
-            )])),
-            legacy_shared_token: None,
-        };
-        let identity = NodeIdentity {
-            node_id: "osaka-01".to_string(),
-            node_label: "Wrong".to_string(),
-            hostname: "osaka-01.internal".to_string(),
-            os: "Ubuntu".to_string(),
-            kernel_version: None,
-            cpu_model: None,
-            cpu_cores: 2,
-            agent_version: "0.1.0".to_string(),
-            boot_time: None,
-            tags: vec!["wrong".to_string()],
-        };
+                }],
+            };
+            std::fs::write(&path, serde_json::to_string_pretty(&file).expect("json"))
+                .expect("registry should be written");
+            let registry = NodeRegistry::load(&path, None)
+                .await
+                .expect("registry should load");
+            let identity = NodeIdentity {
+                node_id: "osaka-01".to_string(),
+                node_label: "Wrong".to_string(),
+                hostname: "osaka-01.internal".to_string(),
+                os: "Ubuntu".to_string(),
+                kernel_version: None,
+                cpu_model: None,
+                cpu_cores: 2,
+                agent_version: "0.1.0".to_string(),
+                boot_time: None,
+                tags: vec!["wrong".to_string()],
+            };
 
-        let authorized = registry
-            .authorize(&identity, "secret")
-            .expect("identity should authorize");
-        assert_eq!(authorized.node_label, "Osaka 01");
-        assert_eq!(authorized.tags, vec!["edge"]);
+            let authorized = registry
+                .authorize(&identity, "secret")
+                .await
+                .expect("identity should authorize");
+            assert_eq!(authorized.node_label, "Osaka 01");
+            assert_eq!(authorized.tags, vec!["edge"]);
+
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_dir(&temp_dir);
+        });
     }
 
     #[test]
@@ -477,6 +554,56 @@ mod tests {
             assert!(command.contains("--token"));
             assert!(command.contains("/install/install-agent.sh"));
             assert!(command.contains("--user"));
+
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_dir(&temp_dir);
+        });
+    }
+
+    #[test]
+    fn registry_reload_picks_up_rotated_tokens() {
+        let runtime = Runtime::new().expect("runtime should build");
+        runtime.block_on(async {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be monotonic enough")
+                .as_nanos();
+            let temp_dir =
+                std::env::temp_dir().join(format!("ximonitor-registry-reload-test-{unique}"));
+            std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+            let path = temp_dir.join("server.json");
+
+            let issued = issue_node(
+                &path,
+                IssueNodeRequest {
+                    node_id: "hk-01".to_string(),
+                    node_label: Some("Hong Kong 01".to_string()),
+                    tags: Vec::new(),
+                    rotate_token: false,
+                },
+            )
+            .await
+            .expect("node should be issued");
+            let old_token = issued.node.token.clone();
+            let registry = NodeRegistry::load(&path, None)
+                .await
+                .expect("registry should load");
+            assert!(registry.is_token_current("hk-01", &old_token).await);
+
+            let rotated = issue_node(
+                &path,
+                IssueNodeRequest {
+                    node_id: "hk-01".to_string(),
+                    node_label: Some("Hong Kong 01".to_string()),
+                    tags: Vec::new(),
+                    rotate_token: true,
+                },
+            )
+            .await
+            .expect("node token should rotate");
+            assert!(registry.reload().await.expect("reload should succeed"));
+            assert!(!registry.is_token_current("hk-01", &old_token).await);
+            assert!(registry.is_token_current("hk-01", &rotated.node.token).await);
 
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_dir(&temp_dir);
