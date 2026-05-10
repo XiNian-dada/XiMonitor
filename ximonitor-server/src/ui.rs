@@ -355,6 +355,19 @@ const INDEX_TEMPLATE: &str = r#"<!doctype html>
         return `${Math.round(value)} ms`;
       }
 
+      function fmtUptime(seconds) {
+        if (seconds == null || Number.isNaN(Number(seconds))) {
+          return t("common.not_available");
+        }
+        const totalHours = Math.floor(Number(seconds) / 3600);
+        const days = Math.floor(totalHours / 24);
+        const hours = totalHours % 24;
+        if (days > 0) {
+          return t("node.uptime.days_hours", { days, hours });
+        }
+        return t("node.uptime.hours", { hours: totalHours });
+      }
+
       function diskSummary(disks) {
         if (!Array.isArray(disks) || disks.length === 0) return t("common.not_available");
         const total = disks.reduce((sum, disk) => sum + (disk.total_bytes || 0), 0);
@@ -1003,7 +1016,7 @@ const NODE_TEMPLATE: &str = r#"<!doctype html>
           [t("node.stats.latency"), fmtLatency(node.latency_ms)],
           [t("node.stats.memory"), `${fmtBytes(memory.used_bytes)} / ${fmtBytes(memory.total_bytes)}`],
           [t("node.stats.swap"), `${fmtBytes(memory.swap_used_bytes)} / ${fmtBytes(memory.swap_total_bytes)}`],
-          [t("node.stats.uptime"), snapshot.uptime_secs != null ? `${Math.round(snapshot.uptime_secs / 3600)}h` : t("common.not_available")],
+          [t("node.stats.uptime"), fmtUptime(snapshot.uptime_secs)],
           [t("node.stats.agent"), node.identity.agent_version || t("common.not_available")],
         ];
         document.getElementById("stats").innerHTML = cards.map(([label, value]) => `
