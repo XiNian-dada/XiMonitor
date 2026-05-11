@@ -20,6 +20,7 @@ mod ui;
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -101,9 +102,20 @@ struct NodeCommandArgs {
 #[derive(Clone)]
 struct AppState {
     history: HistoryStore,
+    readiness: ServerReadiness,
     registry: NodeRegistry,
     shared: SharedState,
     ws_admission: WsAdmissionController,
+}
+
+/// 只跟踪"对外是否可服务"所需的几个关键依赖状态。
+///
+/// - `healthz` 仍然只回答"进程是否存活";
+/// - `readyz` 与 `/api/bootstrap.status` 则用这里的状态反映"是否已具备对外服务能力"。
+#[derive(Clone)]
+struct ServerReadiness {
+    history_available: Arc<AtomicBool>,
+    registry_reload_healthy: Arc<AtomicBool>,
 }
 
 /// 包装 HTTP 基本认证,用于保护 `/api/*` 与 HTML 视图。
@@ -117,6 +129,8 @@ struct ReadonlyRouteAuth {
 struct BootstrapResponse {
     service: &'static str,
     status: &'static str,
+    ready: bool,
+    history_available: bool,
     public_base_url: String,
     refresh_interval_secs: u64,
     registered_nodes: usize,
@@ -253,6 +267,40 @@ impl ReadonlyRouteAuth {
     }
 }
 
+impl ServerReadiness {
+    fn new(history_available: bool) -> Self {
+        Self {
+            history_available: Arc::new(AtomicBool::new(history_available)),
+            registry_reload_healthy: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        self.history_available() && self.registry_reload_healthy()
+    }
+
+    fn status_label(&self) -> &'static str {
+        if self.is_ready() { "ok" } else { "degraded" }
+    }
+
+    fn history_available(&self) -> bool {
+        self.history_available.load(Ordering::Relaxed)
+    }
+
+    fn registry_reload_healthy(&self) -> bool {
+        self.registry_reload_healthy.load(Ordering::Relaxed)
+    }
+
+    fn mark_history_available(&self, available: bool) {
+        self.history_available.store(available, Ordering::Relaxed);
+    }
+
+    fn mark_registry_reload_healthy(&self, healthy: bool) {
+        self.registry_reload_healthy
+            .store(healthy, Ordering::Relaxed);
+    }
+}
+
 impl WsAdmissionController {
     fn new(config: &WsConfig) -> Self {
         Self {
@@ -379,9 +427,11 @@ async fn run_server(config_path: &Path) -> Result<()> {
     let shared = SharedState::new(Arc::clone(&config));
     let history = HistoryStore::new(config.history_db_path.clone());
     history.initialize().await;
+    let readiness = ServerReadiness::new(history.is_available());
+    readiness.mark_history_available(history.is_available());
     restore_snapshot_if_available(&shared, config.snapshot_path.as_path()).await;
 
-    spawn_registry_reloader(registry.clone());
+    spawn_registry_reloader(registry.clone(), readiness.clone());
     spawn_stale_reaper(shared.clone());
     spawn_snapshot_persistor(shared.clone(), config.snapshot_path.clone());
     spawn_insecure_transport_warning(config.public_base_url.clone(), config.listen);
@@ -395,6 +445,7 @@ async fn run_server(config_path: &Path) -> Result<()> {
 
     let state = AppState {
         history,
+        readiness,
         registry,
         shared,
         ws_admission: WsAdmissionController::new(&config.ws),
@@ -414,6 +465,7 @@ async fn run_server(config_path: &Path) -> Result<()> {
         ));
     let app = Router::new()
         .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
         .route("/install/install-agent.sh", get(install_agent_script))
         .route("/install/bootstrap", get(install_bootstrap))
         .route("/ws", get(ws_handler))
@@ -583,6 +635,15 @@ async fn healthz() -> StatusCode {
     StatusCode::OK
 }
 
+/// 就绪检查接口:仅当关键依赖均可用时返回 200,否则返回 503。
+async fn readyz(State(state): State<AppState>) -> StatusCode {
+    if state.readiness.is_ready() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
+}
+
 /// 中间件:对受保护路由强制基本认证;放行时把 Request 继续交给下一个处理器。
 async fn require_readonly_auth(
     State(auth): State<ReadonlyRouteAuth>,
@@ -605,7 +666,9 @@ async fn require_readonly_auth(
 async fn bootstrap(State(state): State<AppState>) -> impl IntoResponse {
     Json(BootstrapResponse {
         service: "ximonitor-server",
-        status: "ok",
+        status: state.readiness.status_label(),
+        ready: state.readiness.is_ready(),
+        history_available: state.readiness.history_available(),
         public_base_url: state.shared.config().public_base_url.clone(),
         refresh_interval_secs: state.shared.config().refresh_interval_secs,
         registered_nodes: state.registry.count().await,
@@ -1018,13 +1081,14 @@ fn spawn_stale_reaper(shared: SharedState) {
 }
 
 /// 后台任务:每秒检查一次注册表文件是否有外部更改(例如 CLI 颁发了新节点)。
-fn spawn_registry_reloader(registry: NodeRegistry) {
+fn spawn_registry_reloader(registry: NodeRegistry, readiness: ServerReadiness) {
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(1));
         loop {
             ticker.tick().await;
             match registry.reload().await {
                 Ok(true) => {
+                    readiness.mark_registry_reload_healthy(true);
                     let enrolled_nodes = registry.count().await;
                     info!(
                         registry_path = %registry.path().display(),
@@ -1032,8 +1096,11 @@ fn spawn_registry_reloader(registry: NodeRegistry) {
                         "reloaded node registry",
                     );
                 }
-                Ok(false) => {}
+                Ok(false) => {
+                    readiness.mark_registry_reload_healthy(true);
+                }
                 Err(error) => {
+                    readiness.mark_registry_reload_healthy(false);
                     warn!(
                         error = ?error,
                         registry_path = %registry.path().display(),
@@ -1463,11 +1530,11 @@ mod tests {
     use super::{
         AppState, MAX_SANITIZED_DISKS, MAX_SANITIZED_LOAD, MAX_SANITIZED_RATE_BYTES_PER_SEC,
         MAX_SANITIZED_STRING_BYTES, METRIC_ANOMALY_SESSION_LIMIT, ReadonlyRouteAuth,
-        SanitizationReport, WsAdmissionController, WsAdmissionError, bootstrap, healthz, index,
-        install_agent_script, install_bootstrap, next_metric_anomaly_count, node_detail,
-        node_history, node_status, nodes, overview, resolve_client_ip, sanitize_snapshot,
-        should_disconnect_for_metric_anomalies, truncate_to_byte_boundary, ui_i18n_asset,
-        uses_insecure_remote_public_base_url, ws_handler,
+        SanitizationReport, ServerReadiness, WsAdmissionController, WsAdmissionError, bootstrap,
+        healthz, index, install_agent_script, install_bootstrap, next_metric_anomaly_count,
+        node_detail, node_history, node_status, nodes, overview, readyz, resolve_client_ip,
+        sanitize_snapshot, should_disconnect_for_metric_anomalies, truncate_to_byte_boundary,
+        ui_i18n_asset, uses_insecure_remote_public_base_url, ws_handler,
     };
     use crate::history::HistoryStore;
     use crate::registry::NodeRegistry;
@@ -1511,6 +1578,7 @@ mod tests {
         let runtime = Runtime::new().expect("runtime should build");
         let state = AppState {
             history: HistoryStore::new(PathBuf::from("./data/history.sqlite3")),
+            readiness: ServerReadiness::new(false),
             registry: runtime
                 .block_on(NodeRegistry::load(config.node_registry_path.as_path()))
                 .expect("registry should load"),
@@ -1529,6 +1597,7 @@ mod tests {
             .route("/nodes/{node_id}", get(node_detail))
             .route("/assets/ui-i18n.json", get(ui_i18n_asset))
             .route("/healthz", get(healthz))
+            .route("/readyz", get(readyz))
             .route("/install/install-agent.sh", get(install_agent_script))
             .route("/install/bootstrap", get(install_bootstrap))
             .route("/api/bootstrap", get(bootstrap))
@@ -1582,6 +1651,22 @@ mod tests {
             "http://localhost:8080",
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
         ));
+    }
+
+    #[test]
+    fn server_readiness_tracks_dependency_health() {
+        let readiness = ServerReadiness::new(true);
+        assert!(readiness.is_ready());
+        assert_eq!(readiness.status_label(), "ok");
+
+        readiness.mark_registry_reload_healthy(false);
+        assert!(!readiness.is_ready());
+        assert_eq!(readiness.status_label(), "degraded");
+
+        readiness.mark_registry_reload_healthy(true);
+        readiness.mark_history_available(false);
+        assert!(!readiness.is_ready());
+        assert!(!readiness.history_available());
     }
 
     #[test]
