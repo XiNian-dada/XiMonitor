@@ -678,7 +678,11 @@ async fn bootstrap(State(state): State<AppState>) -> impl IntoResponse {
 /// 暴露内置安装脚本,供 `curl | sh` 模式安装 Agent 时下载。
 async fn install_agent_script() -> Response {
     (
-        [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store, no-cache, must-revalidate"),
+            (header::PRAGMA, "no-cache"),
+        ],
         INSTALL_AGENT_SCRIPT,
     )
         .into_response()
@@ -689,10 +693,14 @@ async fn install_bootstrap(State(state): State<AppState>, request: Request) -> R
     let Some(token) = bearer_token_from_request(&request) else {
         return (
             StatusCode::UNAUTHORIZED,
-            [(
-                header::WWW_AUTHENTICATE,
-                "Bearer realm=\"XiMonitor Installer\"",
-            )],
+            [
+                (
+                    header::WWW_AUTHENTICATE,
+                    "Bearer realm=\"XiMonitor Installer\"",
+                ),
+                (header::CACHE_CONTROL, "no-store, no-cache, must-revalidate"),
+                (header::PRAGMA, "no-cache"),
+            ],
             "missing install token",
         )
             .into_response();
@@ -703,10 +711,14 @@ async fn install_bootstrap(State(state): State<AppState>, request: Request) -> R
         Ok(None) => {
             return (
                 StatusCode::UNAUTHORIZED,
-                [(
-                    header::WWW_AUTHENTICATE,
-                    "Bearer realm=\"XiMonitor Installer\"",
-                )],
+                [
+                    (
+                        header::WWW_AUTHENTICATE,
+                        "Bearer realm=\"XiMonitor Installer\"",
+                    ),
+                    (header::CACHE_CONTROL, "no-store, no-cache, must-revalidate"),
+                    (header::PRAGMA, "no-cache"),
+                ],
                 "invalid install token",
             )
                 .into_response();
@@ -715,6 +727,10 @@ async fn install_bootstrap(State(state): State<AppState>, request: Request) -> R
             error!(error = ?error, "failed to consume install token");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
+                [
+                    (header::CACHE_CONTROL, "no-store, no-cache, must-revalidate"),
+                    (header::PRAGMA, "no-cache"),
+                ],
                 "failed to prepare agent bootstrap",
             )
                 .into_response();
@@ -723,7 +739,11 @@ async fn install_bootstrap(State(state): State<AppState>, request: Request) -> R
 
     match render_agent_config(&state.shared.config().public_base_url, &node) {
         Ok(agent_config) => (
-            [(header::CONTENT_TYPE, "application/toml; charset=utf-8")],
+            [
+                (header::CONTENT_TYPE, "application/toml; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-store, no-cache, must-revalidate"),
+                (header::PRAGMA, "no-cache"),
+            ],
             agent_config,
         )
             .into_response(),
@@ -731,6 +751,10 @@ async fn install_bootstrap(State(state): State<AppState>, request: Request) -> R
             error!(error = ?error, "failed to render agent bootstrap config");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
+                [
+                    (header::CACHE_CONTROL, "no-store, no-cache, must-revalidate"),
+                    (header::PRAGMA, "no-cache"),
+                ],
                 "failed to render agent bootstrap config",
             )
                 .into_response()
@@ -1529,7 +1553,8 @@ mod tests {
 
     use axum::Router;
     use axum::body::Body;
-    use axum::http::{HeaderMap, Request, header};
+    use axum::extract::State;
+    use axum::http::{HeaderMap, Request, StatusCode, header};
     use chrono::Utc;
     use tokio::runtime::Runtime;
 
@@ -1543,7 +1568,7 @@ mod tests {
         ui_i18n_asset, uses_insecure_remote_public_base_url, ws_handler,
     };
     use crate::history::HistoryStore;
-    use crate::registry::NodeRegistry;
+    use crate::registry::{IssueNodeRequest, NodeRegistry, issue_node};
     use crate::state::SharedState;
     use axum::routing::get;
     use tower_http::trace::TraceLayer;
@@ -1673,6 +1698,105 @@ mod tests {
         readiness.mark_history_available(false);
         assert!(!readiness.is_ready());
         assert!(!readiness.history_available());
+    }
+
+    #[test]
+    fn install_endpoints_disable_caching() {
+        let runtime = Runtime::new().expect("runtime should build");
+        runtime.block_on(async {
+            let script_response = install_agent_script().await;
+            assert_eq!(
+                script_response.headers().get(header::CACHE_CONTROL),
+                Some(&header::HeaderValue::from_static(
+                    "no-store, no-cache, must-revalidate",
+                )),
+            );
+            assert_eq!(
+                script_response.headers().get(header::PRAGMA),
+                Some(&header::HeaderValue::from_static("no-cache")),
+            );
+
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be monotonic enough")
+                .as_nanos();
+            let temp_dir =
+                std::env::temp_dir().join(format!("ximonitor-bootstrap-cache-test-{unique}"));
+            std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+            let registry_path = temp_dir.join("server.json");
+            let issued = issue_node(
+                &registry_path,
+                IssueNodeRequest {
+                    node_id: "osaka-01".to_string(),
+                    node_label: Some("Osaka 01".to_string()),
+                    tags: Vec::new(),
+                    rotate_token: false,
+                },
+            )
+            .await
+            .expect("node should be issued");
+            let config = Arc::new(ServerConfig {
+                listen: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
+                public_base_url: "https://monitor.example.com".to_string(),
+                insecure_allow_http: false,
+                readonly_auth: None,
+                ws: WsConfig {
+                    max_total_connections: 32,
+                    max_connections_per_ip: 8,
+                    auth_fail_window_secs: 300,
+                    auth_fail_max_attempts: 6,
+                    auth_block_secs: 600,
+                },
+                node_registry_path: registry_path.clone(),
+                history_db_path: temp_dir.join("history.sqlite3"),
+                snapshot_path: temp_dir.join("snapshot.json"),
+                stale_after_secs: 20,
+                ping_interval_secs: 10,
+                max_message_bytes: 65536,
+                refresh_interval_secs: 5,
+                ignored_filesystems: vec![],
+                agent_release_base_url: None,
+                agent_release_sha256_x86_64: None,
+                agent_release_sha256_aarch64: None,
+            });
+            let state = AppState {
+                history: HistoryStore::new(config.history_db_path.clone()),
+                readiness: ServerReadiness::new(false),
+                registry: NodeRegistry::load(&registry_path)
+                    .await
+                    .expect("registry should load"),
+                shared: SharedState::new(config),
+                ws_admission: WsAdmissionController::new(&WsConfig {
+                    max_total_connections: 32,
+                    max_connections_per_ip: 8,
+                    auth_fail_window_secs: 300,
+                    auth_fail_max_attempts: 6,
+                    auth_block_secs: 600,
+                }),
+            };
+            let request = Request::builder()
+                .uri("/install/bootstrap")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", issued.install_token),
+                )
+                .body(Body::empty())
+                .expect("request should build");
+            let bootstrap_response = install_bootstrap(State(state), request).await;
+            assert_eq!(bootstrap_response.status(), StatusCode::OK);
+            assert_eq!(
+                bootstrap_response.headers().get(header::CACHE_CONTROL),
+                Some(&header::HeaderValue::from_static(
+                    "no-store, no-cache, must-revalidate",
+                )),
+            );
+            assert_eq!(
+                bootstrap_response.headers().get(header::PRAGMA),
+                Some(&header::HeaderValue::from_static("no-cache")),
+            );
+
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        });
     }
 
     #[test]
