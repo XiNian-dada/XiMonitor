@@ -321,15 +321,12 @@
         inset: 0;
         width: 100%;
         height: 100%;
-        filter: drop-shadow(0 18px 36px rgba(0,0,0,0.22));
+        filter: drop-shadow(0 18px 36px rgba(0,0,0,0.20));
       }
-      .map-land {
-        fill: rgba(76, 96, 128, 0.34);
-        stroke: rgba(148, 163, 184, 0.16);
-        stroke-width: 1.4;
-      }
-      .map-land.dense {
-        fill: rgba(96, 116, 148, 0.22);
+      .map-land-dot {
+        fill: rgba(148, 163, 184, 0.36);
+        stroke: rgba(15, 23, 42, 0.28);
+        stroke-width: 0.35;
       }
       .map-dot {
         position: absolute;
@@ -621,20 +618,7 @@
             <div class="map-stage">
               <div class="map-grid"></div>
               <svg class="map-svg" viewBox="0 0 1000 500" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
-                <defs>
-                  <pattern id="dotsPattern" width="14" height="14" patternUnits="userSpaceOnUse">
-                    <circle cx="2" cy="2" r="1.1" fill="currentColor" opacity="0.32" />
-                  </pattern>
-                </defs>
-                <g color="#64748b">
-                  <path class="map-land" d="M113,147 C136,119 184,103 228,112 C276,122 313,150 331,187 C315,213 281,227 238,226 C197,225 151,211 126,188 C111,174 104,160 113,147 Z" />
-                  <path class="map-land dense" d="M153,234 C188,232 221,252 234,286 C246,321 232,365 205,397 C183,385 166,351 161,312 C157,281 140,253 153,234 Z" />
-                  <path class="map-land" d="M366,139 C417,113 501,112 573,132 C638,150 669,181 659,211 C622,232 560,235 495,224 C433,214 382,194 366,165 C359,154 358,146 366,139 Z" />
-                  <path class="map-land dense" d="M454,236 C507,242 575,275 613,318 C609,365 556,405 501,405 C463,391 440,352 438,307 C437,276 442,252 454,236 Z" />
-                  <path class="map-land" d="M611,132 C684,113 793,132 862,169 C882,202 857,239 801,257 C735,278 667,262 631,227 C609,199 598,160 611,132 Z" />
-                  <path class="map-land dense" d="M808,332 C855,319 914,344 931,382 C910,414 858,420 825,395 C803,378 796,351 808,332 Z" />
-                  <path class="map-land dense" d="M469,103 C490,88 527,92 545,113 C520,123 489,122 469,103 Z" />
-                </g>
+                <g id="map-land-dots"></g>
               </svg>
               <div id="map-dots"></div>
             </div>
@@ -758,6 +742,26 @@
         usa: "🇺🇸", ca: "🇨🇦", br: "🇧🇷", ar: "🇦🇷", mx: "🇲🇽", za: "🇿🇦",
         ng: "🇳🇬", eg: "🇪🇬",
       };
+      const MAP_WIDTH = 1000;
+      const MAP_HEIGHT = 500;
+      const MAP_MAX_LAT = 82;
+      const MAP_MAX_MERCATOR = Math.log(Math.tan(Math.PI / 4 + (MAP_MAX_LAT * Math.PI / 180) / 2));
+      const WORLD_LAND_POLYGONS = [
+        [[-168,72],[-142,58],[-132,50],[-124,49],[-126,37],[-117,32],[-108,24],[-91,16],[-80,24],[-74,40],[-54,48],[-53,58],[-75,70],[-110,74]],
+        [[-94,22],[-84,18],[-78,8],[-83,5],[-98,13],[-112,24],[-117,31],[-108,25]],
+        [[-82,12],[-70,11],[-54,-4],[-36,-20],[-44,-38],[-58,-55],[-72,-50],[-78,-32],[-81,-8]],
+        [[-54,82],[-20,76],[-18,62],[-42,58],[-62,66]],
+        [[-11,71],[14,70],[34,63],[56,67],[90,72],[128,66],[166,58],[178,48],[151,38],[123,32],[111,20],[101,7],[77,8],[67,22],[45,27],[35,41],[17,42],[2,49],[-10,46],[-25,57]],
+        [[-18,36],[2,38],[30,32],[51,12],[43,-34],[20,-35],[4,-26],[-12,-5],[-18,14]],
+        [[35,31],[54,27],[58,16],[45,12],[37,20]],
+        [[68,24],[89,25],[91,8],[78,6],[68,18]],
+        [[96,20],[108,22],[122,8],[116,-8],[101,-5]],
+        [[112,-11],[154,-12],[154,-38],[116,-43],[110,-24]],
+        [[45,-12],[51,-16],[49,-26],[44,-24]],
+        [[137,45],[146,40],[143,31],[134,34]],
+        [[121,25],[123,22],[121,21],[119,23]],
+        [[170,-34],[179,-39],[174,-45],[166,-43]],
+      ];
 
       function escapeHtml(value) {
         return String(value)
@@ -949,6 +953,40 @@
         if (ms < 200) return { bg: "rgba(234,179,8,0.18)", fg: "#facc15" };
         if (ms < 350) return { bg: "rgba(249,115,22,0.18)", fg: "#fb923c" };
         return { bg: "rgba(239,68,68,0.20)", fg: "#f87171" };
+      }
+
+      function mapInvertMercator(x, y) {
+        const lon = (x / MAP_WIDTH) * 360 - 180;
+        const mercator = ((MAP_HEIGHT / 2) - y) / (MAP_HEIGHT * 0.46) * MAP_MAX_MERCATOR;
+        const lat = (2 * Math.atan(Math.exp(mercator)) - Math.PI / 2) * 180 / Math.PI;
+        return [lon, lat];
+      }
+      function pointInPolygon(lon, lat, polygon) {
+        let inside = false;
+        for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+          const [xi, yi] = polygon[i];
+          const [xj, yj] = polygon[j];
+          const intersects = ((yi > lat) !== (yj > lat)) && (lon < ((xj - xi) * (lat - yi)) / ((yj - yi) || Number.EPSILON) + xi);
+          if (intersects) inside = !inside;
+        }
+        return inside;
+      }
+      function isWorldLand(lon, lat) {
+        return WORLD_LAND_POLYGONS.some((polygon) => pointInPolygon(lon, lat, polygon));
+      }
+      function renderWorldDotMap() {
+        const root = document.getElementById("map-land-dots");
+        if (!root) return;
+        const spacing = 13;
+        const dots = [];
+        for (let y = 38; y <= MAP_HEIGHT - 34; y += spacing) {
+          for (let x = 42; x <= MAP_WIDTH - 42; x += spacing) {
+            const [lon, lat] = mapInvertMercator(x, y);
+            if (!isWorldLand(lon, lat)) continue;
+            dots.push(`<circle class="map-land-dot" cx="${x}" cy="${y}" r="1.55" />`);
+          }
+        }
+        root.innerHTML = dots.join("");
       }
 
       function renderMapDots(nodes) {
@@ -1220,6 +1258,7 @@
           renderNodes(latestNodes);
         });
         applyChrome();
+        renderWorldDotMap();
         refresh();
         window.setInterval(() => { if (latestOverview) renderUpdated(latestOverview); }, 30000);
       }
