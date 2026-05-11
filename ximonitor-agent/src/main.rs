@@ -1,3 +1,15 @@
+// XiMonitor Agent 入口程序。
+//
+// 角色:运行在被监控的 Linux 节点上,周期性采集系统指标,
+// 通过 WebSocket 推送至中心 Server。
+//
+// 主要流程:
+// 1. 读取 TOML 配置 → 初始化日志与 rustls。
+// 2. 用 `HostCollector` 采集节点身份与首张快照(`--sample-once` 模式下直接打印退出)。
+// 3. 进入 `run_forever` 重连循环,内部通过 `run_session` 维护一次具体的会话。
+// 4. 在会话中处理:Hello → 等待服务器 `authenticated` 通知 → 周期性发送 Metrics
+//    → 响应 Ping / 处理 Close。
+
 mod collector;
 
 use std::path::{Path, PathBuf};
@@ -19,19 +31,28 @@ use ximonitor_proto::{
 
 use crate::collector::new_collector;
 
+/// 不安全传输警告的输出间隔(秒)。
 const INSECURE_TRANSPORT_WARN_INTERVAL_SECS: u64 = 900;
+/// 建立 WebSocket 连接时的超时阈值(秒)。
 const CONNECT_TIMEOUT_SECS: u64 = 20;
 
+/// 命令行参数。
 #[derive(Debug, Parser)]
 #[command(name = "ximonitor-agent")]
 #[command(about = "XiMonitor Linux agent")]
 struct Cli {
+    /// 配置文件路径,默认 `config/agent.toml`。
     #[arg(long, default_value = "config/agent.toml")]
     config: PathBuf,
+    /// 仅采集一次快照并输出 JSON,常用于调试与排障。
     #[arg(long)]
     sample_once: bool,
 }
 
+/// 单次会话失败时携带的上下文。
+///
+/// `established_session` 表示在出错前是否已完成认证;
+/// 重连退避逻辑会据此判断要不要重置失败计数。
 #[derive(Debug)]
 struct SessionError {
     established_session: bool,
@@ -71,16 +92,19 @@ async fn main() -> Result<()> {
     run_forever(config, collector, identity).await
 }
 
+/// 安装 rustls 默认的密码套件提供者(ring 后端)。
 fn install_rustls_crypto_provider() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .map_err(|_| anyhow!("failed to install rustls crypto provider"))
 }
 
+/// 获取 Agent 版本号:优先使用打包时通过环境变量注入的版本,缺失则回退到 Cargo 包版本。
 fn agent_build_version() -> &'static str {
     option_env!("XIMONITOR_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
+/// 从磁盘读取并解析 Agent 配置文件。
 async fn load_agent_config(path: &Path) -> Result<AgentConfig> {
     let content = fs::read_to_string(path)
         .await
@@ -89,6 +113,7 @@ async fn load_agent_config(path: &Path) -> Result<AgentConfig> {
         .map_err(|error| anyhow!("failed to parse {}: {error}", path.display()))
 }
 
+/// 初始化 `tracing` 日志:支持通过 `RUST_LOG` 调整级别。
 fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -100,6 +125,7 @@ fn init_tracing() {
         .init();
 }
 
+/// 无限重连循环:无论会话以何种方式结束,都会按指数退避重试。
 async fn run_forever(
     config: AgentConfig,
     mut collector: crate::collector::HostCollector,
@@ -113,6 +139,7 @@ async fn run_forever(
                 attempt = 0;
             }
             Err(error) => {
+                // 已建立过认证会话的失败不计入连续失败次数,避免被偶发网络故障误判为暴力重试。
                 if error.established_session {
                     attempt = 0;
                 }
@@ -131,6 +158,9 @@ async fn run_forever(
     }
 }
 
+/// 与 Server 进行一次完整的 WebSocket 会话。
+///
+/// 状态机:连接 → Hello → 等待服务器 `authenticated` 通知 → 周期上报 Metrics 直至连接断开。
 async fn run_session(
     config: &AgentConfig,
     collector: &mut crate::collector::HostCollector,
@@ -162,9 +192,8 @@ async fn run_session(
     loop {
         tokio::select! {
             _ = report_ticker.tick(), if authenticated => {
-                // Wait for the server's explicit auth notice before starting the
-                // steady metrics stream; that gives reconnect logic a clean
-                // "pre-auth" vs "established session" boundary.
+                // 必须等到服务器明确下发"已认证"通知后再启动周期上报,
+                // 这样重连退避逻辑就能清晰区分"认证前失败"与"认证后断开"。
                 send_metrics(&mut sender, collector)
                     .await
                     .map_err(|error| session_error(true, error))?;
@@ -232,6 +261,7 @@ fn session_error(established_session: bool, source: anyhow::Error) -> SessionErr
     }
 }
 
+/// 采集一次快照并以 `Metrics` 帧发送出去。
 async fn send_metrics(
     sender: &mut futures::stream::SplitSink<
         tokio_tungstenite::WebSocketStream<
@@ -245,6 +275,7 @@ async fn send_metrics(
     send_wire_message(sender, &WireMessage::Metrics(MetricsMessage { snapshot })).await
 }
 
+/// 把任意 `WireMessage` 序列化为 JSON 文本帧并发送。
 async fn send_wire_message(
     sender: &mut futures::stream::SplitSink<
         tokio_tungstenite::WebSocketStream<
@@ -262,6 +293,7 @@ async fn send_wire_message(
     Ok(())
 }
 
+/// 将服务器通知按级别映射到对应的 `tracing` 日志级别。
 fn log_notice(level: NoticeLevel, message: &str) {
     match level {
         NoticeLevel::Info => info!(message = %message, "server notice"),
@@ -270,6 +302,7 @@ fn log_notice(level: NoticeLevel, message: &str) {
     }
 }
 
+/// 指数退避表:前几次快速重试,后续上限为 60 秒。
 fn reconnect_delay(attempt: u32) -> Duration {
     let seconds = match attempt {
         0 => 1,
@@ -283,6 +316,7 @@ fn reconnect_delay(attempt: u32) -> Duration {
     Duration::from_secs(seconds)
 }
 
+/// 若 Agent 配置了未启用 TLS 的远程服务器,则周期性输出警告日志。
 fn spawn_insecure_transport_warning(server_url: String) {
     if !uses_insecure_remote_transport(&server_url) {
         return;
@@ -300,6 +334,7 @@ fn spawn_insecure_transport_warning(server_url: String) {
     });
 }
 
+/// 判定服务器 URL 是否属于"远程明文"传输:`ws://` 且主机不是本地回环。
 fn uses_insecure_remote_transport(server_url: &str) -> bool {
     let Ok(url) = Url::parse(server_url) else {
         return false;
@@ -311,6 +346,7 @@ fn uses_insecure_remote_transport(server_url: &str) -> bool {
     !host_is_local(url.host_str())
 }
 
+/// 判定主机字段是否表示本机:`localhost` 或回环 IP。
 fn host_is_local(host: Option<&str>) -> bool {
     let Some(host) = host else {
         return false;

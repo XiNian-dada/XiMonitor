@@ -1,3 +1,9 @@
+// 节点状态磁盘快照:为了在 Server 重启后能立即展示"上一秒"的视图,
+// 这里周期性地把 `SharedState` 的所有 `NodeStatus` 写入磁盘文件。
+//
+// 写入采用"原子替换":先写入 `*.tmp`,再 `rename` 覆盖目标文件,避免读者
+// 看到半截内容。同时把权限收敛到 `0600`,使非 root 用户无法读取敏感字段。
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +19,7 @@ use crate::state::SharedState;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+/// 从磁盘读取上一次的快照文件并反序列化。
 pub async fn load_snapshot(path: &Path) -> Result<Vec<NodeStatus>> {
     let content = fs::read_to_string(path)
         .await
@@ -22,6 +29,7 @@ pub async fn load_snapshot(path: &Path) -> Result<Vec<NodeStatus>> {
     Ok(statuses)
 }
 
+/// 启动一个后台任务,每 15 秒把当前 `SharedState` 序列化到 `snapshot_path`。
 pub fn spawn_snapshot_persistor(shared: SharedState, snapshot_path: PathBuf) {
     let snapshot_path = Arc::new(snapshot_path);
     tokio::spawn(async move {
@@ -36,6 +44,7 @@ pub fn spawn_snapshot_persistor(shared: SharedState, snapshot_path: PathBuf) {
     });
 }
 
+/// 实际执行"写临时文件 → rename → 设权限"的步骤。
 async fn persist_snapshot(path: &Path, statuses: &[NodeStatus]) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -49,6 +58,7 @@ async fn persist_snapshot(path: &Path, statuses: &[NodeStatus]) -> Result<()> {
         serde_json::to_vec_pretty(statuses).context("failed to serialize node snapshot")?;
     let temporary_path = temporary_snapshot_path(path);
     let temporary_path_for_write = temporary_path.clone();
+    // 实际写盘的同步操作放到 spawn_blocking 里执行,避免阻塞异步线程池。
     tokio::task::spawn_blocking(move || {
         write_snapshot_payload(&temporary_path_for_write, &payload)
     })
@@ -61,12 +71,14 @@ async fn persist_snapshot(path: &Path, statuses: &[NodeStatus]) -> Result<()> {
     Ok(())
 }
 
+/// 把目标路径加上 `.tmp` 后缀作为中转文件。
 fn temporary_snapshot_path(path: &Path) -> PathBuf {
     let mut temporary = path.as_os_str().to_os_string();
     temporary.push(".tmp");
     temporary.into()
 }
 
+/// 以 0600 权限创建临时文件并写入完整 payload。
 fn write_snapshot_payload(path: &Path, payload: &[u8]) -> Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).truncate(true).write(true);
@@ -83,6 +95,7 @@ fn write_snapshot_payload(path: &Path, payload: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// 强制把目标文件的权限调整为 0600(仅文件属主可读写)。
 fn harden_snapshot_permissions(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {

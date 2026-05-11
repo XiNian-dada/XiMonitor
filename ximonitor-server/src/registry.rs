@@ -1,3 +1,13 @@
+// 节点注册表:服务端唯一的"哪些节点被允许上报"的事实来源。
+//
+// 注册表是一份 JSON 文件,内容由 `RegistryFile` 结构序列化得到。
+// 服务端进程与运维 CLI(`server install-agent` 等)都会读写这份文件,
+// 因此对每次写入都采用 flock + 原子替换的策略。
+//
+// 字段语义:
+// - `RegisteredNode`:被认证的 Agent 凭证(node_id + token)。
+// - `InstallSession`:一次性的"安装令牌",拥有它可以拉取 Agent 配置。
+
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -17,6 +27,7 @@ use ximonitor_proto::NodeIdentity;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+/// 已登记节点的持久化条目。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegisteredNode {
     pub node_id: String,
@@ -27,6 +38,9 @@ pub struct RegisteredNode {
     pub created_at: DateTime<Utc>,
 }
 
+/// 安装会话:由 CLI 颁发的一次性令牌,Agent 用它拉取自己的配置。
+///
+/// `expires_at` 为绝对过期时间;每次写入注册表时会顺带清理已过期会话。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstallSession {
     pub token: String,
@@ -35,6 +49,7 @@ pub struct InstallSession {
     pub expires_at: DateTime<Utc>,
 }
 
+/// 注册表的运行期视图:进程内部以 HashMap 形式持有,便于鉴权 / 查询。
 #[derive(Debug, Clone)]
 pub struct NodeRegistry {
     path: Arc<PathBuf>,
@@ -47,6 +62,7 @@ struct RegistryState {
     install_sessions: HashMap<String, InstallSession>,
 }
 
+/// `server install-agent` / `server issue-node` 等命令传给注册表的请求结构。
 #[derive(Debug, Clone)]
 pub struct IssueNodeRequest {
     pub node_id: String,
@@ -55,6 +71,7 @@ pub struct IssueNodeRequest {
     pub rotate_token: bool,
 }
 
+/// `IssueNodeRequest` 的结果集:同时返回节点凭证与一次性安装令牌。
 #[derive(Debug, Clone)]
 pub struct IssueNodeResult {
     pub node: RegisteredNode,
@@ -73,9 +90,11 @@ struct RegistryFile {
     install_sessions: Vec<InstallSession>,
 }
 
+/// 一次性安装令牌的有效期(分钟)。
 const INSTALL_TOKEN_TTL_MINUTES: i64 = 15;
 
 impl NodeRegistry {
+    /// 从磁盘加载注册表;文件不存在时返回空注册表(首次部署的合理状态)。
     pub async fn load(path: &Path) -> Result<Self> {
         let state = load_registry_state(path).await?;
 
@@ -85,6 +104,7 @@ impl NodeRegistry {
         })
     }
 
+    /// 校验 Agent 提交的 Hello 信息与 token,通过后返回"覆盖了注册表里权威字段"的身份。
     pub async fn authorize(&self, identity: &NodeIdentity, token: &str) -> Result<NodeIdentity> {
         validate_runtime_identity(identity)?;
         validate_non_empty("hello.token", token)?;
@@ -92,11 +112,14 @@ impl NodeRegistry {
         authorize_identity(&state.entries, identity, token)
     }
 
+    /// 判断当前 token 是否仍是该节点的有效凭证。
+    /// 用于在长连接运行中检测"管理员是否已轮换该节点 token"。
     pub async fn is_token_current(&self, node_id: &str, token: &str) -> bool {
         let state = self.state.read().await;
         is_token_current(&state.entries, node_id, token)
     }
 
+    /// 从磁盘重新加载注册表。返回 `Ok(true)` 表示发现了变化。
     pub async fn reload(&self) -> Result<bool> {
         let next_state = load_registry_state(self.path.as_path()).await?;
         let mut state = self.state.write().await;
@@ -108,11 +131,13 @@ impl NodeRegistry {
         Ok(true)
     }
 
+    /// 已登记的节点数量。
     pub async fn count(&self) -> usize {
         let state = self.state.read().await;
         state.entries.len()
     }
 
+    /// 一次性消费安装令牌:成功时返回对应的 `RegisteredNode`,并把令牌从注册表移除。
     pub async fn consume_install_token(&self, token: &str) -> Result<Option<RegisteredNode>> {
         validate_non_empty("install token", token)?;
 
@@ -152,6 +177,9 @@ impl NodeRegistry {
     }
 }
 
+/// 创建或更新一个节点:首次出现时插入新条目,已存在时按需轮换 token、覆盖标签等。
+///
+/// 同时为该节点签发一个一次性安装令牌。这是 CLI 命令的核心入口。
 pub async fn issue_node(path: &Path, request: IssueNodeRequest) -> Result<IssueNodeResult> {
     validate_identifier("node_id", &request.node_id)?;
     if let Some(node_label) = request.node_label.as_deref() {
@@ -230,6 +258,7 @@ pub async fn issue_node(path: &Path, request: IssueNodeRequest) -> Result<IssueN
     Ok(result)
 }
 
+/// 从 `public_base_url` 推导 Agent 应连接的 WebSocket URL(http → ws,https → wss)。
 pub fn build_agent_server_url(public_base_url: &str) -> Result<String> {
     let mut url = Url::parse(public_base_url)
         .with_context(|| "invalid server.public_base_url".to_string())?;
@@ -246,6 +275,7 @@ pub fn build_agent_server_url(public_base_url: &str) -> Result<String> {
     Ok(url.into())
 }
 
+/// 拼装"安装脚本下载 URL"。
 pub fn build_install_script_url(public_base_url: &str) -> Result<String> {
     let mut url = Url::parse(public_base_url)
         .with_context(|| "invalid server.public_base_url".to_string())?;
@@ -255,6 +285,7 @@ pub fn build_install_script_url(public_base_url: &str) -> Result<String> {
     Ok(url.into())
 }
 
+/// 拼装"安装引导 URL":Agent 安装脚本会带上 Bearer 安装令牌请求这个地址换取自己的 agent.toml。
 pub fn build_install_bootstrap_url(public_base_url: &str) -> Result<String> {
     let mut url = Url::parse(public_base_url)
         .with_context(|| "invalid server.public_base_url".to_string())?;
@@ -264,6 +295,8 @@ pub fn build_install_bootstrap_url(public_base_url: &str) -> Result<String> {
     Ok(url.into())
 }
 
+/// 从 GitHub 仓库 URL 推导 `releases/latest/download` 形式的下载基地址。
+/// 只支持 GitHub 仓库,避免误把任意 URL 当作发布源。
 pub fn build_github_release_base_url(repository_url: &str) -> Result<String> {
     let url = Url::parse(repository_url).with_context(|| "invalid repository URL".to_string())?;
     let host = url
@@ -295,10 +328,14 @@ pub fn build_github_release_base_url(repository_url: &str) -> Result<String> {
     Ok(release_url.into())
 }
 
+/// 缺省下载源:由当前 crate 在编译期注入的仓库地址推导而来。
 pub fn default_agent_release_base_url() -> Result<String> {
     build_github_release_base_url(env!("CARGO_PKG_REPOSITORY"))
 }
 
+/// 渲染"复制即可用"的安装命令文本。
+///
+/// 输出形如多行 `curl ... | sh ...`,把安装令牌通过环境变量传递,避免它出现在 `ps` 列表中。
 pub fn render_install_command(
     public_base_url: &str,
     install_token: &str,
@@ -319,6 +356,7 @@ pub fn render_install_command(
     Ok(lines.join("\n"))
 }
 
+/// 渲染就地升级 Agent 的命令文本。与 `render_install_command` 类似,但不需要令牌。
 pub fn render_upgrade_command(
     public_base_url: &str,
     agent_release_base_url: &str,
@@ -334,6 +372,7 @@ pub fn render_upgrade_command(
     Ok(lines.join("\n"))
 }
 
+/// 渲染单个节点的 `agent.toml` 文本,作为引导接口的响应体。
 pub fn render_agent_config(public_base_url: &str, node: &RegisteredNode) -> Result<String> {
     let server_url = build_agent_server_url(public_base_url)?;
     let mut content = String::new();
@@ -445,6 +484,7 @@ fn save_registry_file_sync(path: &Path, file: &RegistryFile) -> Result<()> {
     Ok(())
 }
 
+/// 在 `spawn_blocking` 中以"读 → 改 → 写"的方式更新注册表文件,并由 flock 保护互斥。
 async fn mutate_registry_file<T, F>(path: &Path, operation: F) -> Result<(T, RegistryFile)>
 where
     T: Send + 'static,
@@ -452,8 +492,8 @@ where
 {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        // Registry changes come from both the running server and one-shot CLI
-        // commands, so serialize them through a file lock before read-modify-write.
+        // 注册表的修改可能来自运行中的 Server,也可能来自一次性 CLI 命令,
+        // 所以在 read-modify-write 之前先拿到文件锁,保证串行化。
         let _lock = acquire_registry_lock(&path)?;
         let mut file = load_registry_file_sync(&path)?;
         let (value, should_persist) = operation(&mut file)?;
@@ -656,8 +696,9 @@ fn is_token_current(entries: &HashMap<String, RegisteredNode>, node_id: &str, to
     false
 }
 
+/// 常量时间字符串比较,用于 token 校验,避免基于响应耗时的旁路攻击。
 fn constant_time_eq(left: &str, right: &str) -> bool {
-    // Keep token comparisons insensitive to early mismatch position.
+    // 让 token 比较的耗时与"在哪个字节最早出现差异"无关。
     let left = left.as_bytes();
     let right = right.as_bytes();
     let mut diff = left.len() ^ right.len();
@@ -725,6 +766,7 @@ fn normalize_string_list(values: Vec<String>) -> Vec<String> {
     values
 }
 
+/// 生成 256-bit 的随机 token 并以十六进制字符串形式返回。
 fn generate_token() -> Result<String> {
     let mut bytes = [0_u8; 32];
     fill_random(&mut bytes).context("failed to gather secure random bytes")?;

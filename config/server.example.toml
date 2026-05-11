@@ -1,29 +1,48 @@
+# Server 配置示例。完整字段说明见 ximonitor-proto/src/config.rs 中的 ServerConfig。
+
 [server]
+# 进程监听地址。生产部署通常监听 127.0.0.1,由前置 Nginx / Caddy 终止 TLS。
 listen = "127.0.0.1:8080"
+# 对外可访问的基地址,供前端与 Agent 推导 ws/wss、安装脚本 URL。
 public_base_url = "https://monitor.example.com"
-# Set this to true only when you intentionally expose the panel over plain HTTP,
-# for example in an isolated test environment without TLS termination.
+# 仅当你确实需要让面板以明文 HTTP 暴露(例如没有 TLS 终止的隔离测试环境)时
+# 才设置为 true。生产环境务必保持 false。
 insecure_allow_http = false
+# 节点凭证文件;Server 与 CLI 都会读写它。
 node_registry_path = "./config/server.json"
+# 历史数据 SQLite 文件,缺失时会在启动时自动创建。
 history_db_path = "./data/history.sqlite3"
+# 运行态快照文件,用于 Server 重启后秒级恢复最近视图。
 snapshot_path = "./data/snapshot.json"
+# 多少秒未收到心跳即视为节点离线。
 stale_after_secs = 20
+# Server 主动向 Agent 发送 Ping 的间隔(秒),决定 RTT 测量频率。
 ping_interval_secs = 10
+# WebSocket 单帧最大字节数,防止异常 Agent 发巨型负载。
 max_message_bytes = 65536
 
 [auth]
+# 前端只读访问用的基本认证用户名。
 username = "viewer"
+# 对应密码,生产环境务必修改,不要沿用默认值。
 password = "change-this-password"
 
 [ws]
+# 全局并发 WebSocket 连接上限。
 max_total_connections = 1024
+# 单个客户端 IP 的并发连接上限。
 max_connections_per_ip = 32
+# 认证失败统计窗口(秒),超出窗口的失败记录会被清理。
 auth_fail_window_secs = 300
+# 窗口内允许的最大失败次数,达到后触发临时封禁。
 auth_fail_max_attempts = 12
+# 触发封禁后该 IP 被禁止重连的时长(秒)。
 auth_block_secs = 900
 
 [ui]
+# 前端轮询接口刷新的间隔(秒),数据从 SharedState 实时返回。
 refresh_interval_secs = 5
 
 [filters]
+# 这里列出的文件系统类型会从磁盘视图中过滤掉,避免容器/虚拟挂载干扰统计。
 ignored_filesystems = ["tmpfs", "devtmpfs", "overlay"]

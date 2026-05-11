@@ -1,44 +1,63 @@
+// Agent 与 Server 之间通过 WebSocket 交换的消息定义。
+// 所有消息均为 JSON 文本帧,顶层使用 `type` 字段进行内部标记式枚举区分。
+
 use serde::{Deserialize, Serialize};
 
 use crate::model::{NodeIdentity, NodeSnapshot};
 
+/// 线协议消息枚举:WebSocket 通道上允许出现的所有消息类型。
+///
+/// 序列化时通过 `type` 字段区分子类型,例如 `{"type":"hello", ...}`。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireMessage {
+    /// Agent 建立连接后发送的握手消息,携带身份与令牌。
     Hello(HelloMessage),
+    /// Agent 周期性上报的监控快照。
     Metrics(MetricsMessage),
+    /// Server 发往 Agent 的心跳探测,用于测量往返时延。
     Ping(PingMessage),
+    /// Agent 对 Server `Ping` 的响应。
     Pong(PongMessage),
+    /// Server 推送给 Agent 的告知性消息(认证成功、错误提示等)。
     ServerNotice(ServerNoticeMessage),
 }
 
+/// Agent 连接 Server 时发送的首个消息。
+///
+/// `token` 由 Server 的节点注册表分发,`identity` 由 Agent 在本地采集后填充。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HelloMessage {
     pub token: String,
     pub identity: NodeIdentity,
 }
 
+/// Agent 周期性上报的监控数据包装。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MetricsMessage {
     pub snapshot: NodeSnapshot,
 }
 
+/// Server 发往 Agent 的心跳请求,`nonce` 用于配对返回的 Pong。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PingMessage {
     pub nonce: u64,
 }
 
+/// Agent 回复的心跳响应,需要回传相同的 `nonce`。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PongMessage {
     pub nonce: u64,
 }
 
+/// Server 推送的通知消息,Agent 用于日志输出与判定认证状态等。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerNoticeMessage {
     pub level: NoticeLevel,
     pub message: String,
 }
 
+/// 通知级别,与常见的日志等级对应。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NoticeLevel {
@@ -54,6 +73,7 @@ mod tests {
     use super::{HelloMessage, NoticeLevel, ServerNoticeMessage, WireMessage};
     use crate::model::{LoadAverage, MemoryUsage, NetworkCounters, NodeIdentity, NodeSnapshot};
 
+    /// 验证所有 WireMessage 子类型都能完整序列化和反序列化。
     #[test]
     fn round_trips_wire_messages() {
         let identity = NodeIdentity {

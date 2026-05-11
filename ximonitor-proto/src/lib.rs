@@ -1,3 +1,9 @@
+// XiMonitor 协议公共库:定义 Agent 与 Server 共享的数据结构和通信约束。
+//
+// - `config`:解析并校验 Agent / Server 的 TOML 配置文件。
+// - `message`:WebSocket 上传输的线协议(WireMessage)。
+// - `model`:节点身份、监控快照、历史采样等数据模型。
+
 pub mod config;
 pub mod message;
 pub mod model;

@@ -1,5 +1,16 @@
 #!/bin/sh
+# XiMonitor Server 一键安装 / 升级 / 迁移脚本。
+#
+# 主要流程:
+#   1. 解析参数与环境变量,确定模式(install / upgrade / migrate / auto)。
+#   2. 探测当前是否已存在安装(unit 文件、配置文件、二进制),据此推断默认值。
+#   3. 拉取并校验对应架构的发布二进制,落到 /usr/local/bin。
+#   4. 生成或保留 server.toml / server.json,写入 systemd unit,重启服务。
+#
+# 设计目标与 install-agent.sh 一致:全部 POSIX shell、不依赖 bash。
+
 set -eu
+# 默认 umask:确保临时文件不会泄漏给同主机其它用户。
 umask 077
 
 BASE_URL="${XIMONITOR_SERVER_BASE_URL:-https://github.com/XiNian-dada/XiMonitor/releases/latest/download}"
@@ -13,15 +24,18 @@ MODE="${XIMONITOR_SERVER_MODE:-auto}"
 TMP_BIN=""
 TMP_SHA256=""
 
+# 统一的错误输出函数。
 fail() {
   printf '%s\n' "install-server: $*" >&2
   exit 1
 }
 
+# 依赖命令检查。
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
+# 退出时清理临时文件。
 cleanup() {
   [ -n "$TMP_BIN" ] && rm -f "$TMP_BIN"
   [ -n "$TMP_SHA256" ] && rm -f "$TMP_SHA256"
@@ -29,6 +43,7 @@ cleanup() {
 
 trap cleanup EXIT HUP INT TERM
 
+# 清屏:优先使用 `clear`,否则发送 ANSI 序列。
 clear_screen() {
   if command -v clear >/dev/null 2>&1; then
     clear
@@ -37,6 +52,7 @@ clear_screen() {
   printf '\033c'
 }
 
+# 通用交互式读取:提供默认值,空输入将沿用默认值。
 read_line() {
   prompt="$1"
   default_value="$2"
@@ -54,6 +70,7 @@ read_line() {
   printf '%s' "$value"
 }
 
+# 必填字段:空输入时循环提示。
 prompt_required() {
   prompt="$1"
   default_value="$2"
@@ -68,6 +85,7 @@ prompt_required() {
   done
 }
 
+# 校验运行模式。auto 表示按已存在文件自动判断 install / upgrade。
 validate_mode() {
   case "$1" in
     auto|install|upgrade|migrate)
@@ -79,6 +97,7 @@ validate_mode() {
   esac
 }
 
+# 默认为 n 的确认提示:用于覆盖现有安装等危险操作。
 confirm_default_no() {
   prompt="$1"
 
@@ -98,16 +117,19 @@ confirm_default_no() {
   done
 }
 
+# 从 /dev/urandom 中生成指定字节数的十六进制串。
 random_hex() {
   bytes="$1"
   od -An -N"$bytes" -tx1 /dev/urandom | tr -d ' \n'
 }
 
+# 在 [20000, 40000) 区间内随机一个端口,降低默认监听端口被占用的概率。
 random_port() {
   raw_port="$(od -An -N2 -tu2 /dev/urandom | tr -d ' ')"
   printf '%s' "$((20000 + raw_port % 20000))"
 }
 
+# 计算文件 SHA-256:优先 sha256sum,缺失时回退到 shasum -a 256。
 calculate_sha256() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | sed 's/[[:space:]].*$//'
@@ -120,6 +142,7 @@ calculate_sha256() {
   fail "missing required command: sha256sum or shasum"
 }
 
+# 拉取发布源的 SHA256SUMS.txt 并解析出当前 artifact 的预期摘要。
 fetch_expected_sha256() {
   artifact_name="$1"
   checksums_url="$BASE_URL/SHA256SUMS.txt"
@@ -143,6 +166,7 @@ fetch_expected_sha256() {
   printf '%s' "$expected_sha256"
 }
 
+# 把 `releases/latest/download` 解析为具体 tag,固化本次安装版本。
 resolve_release_base_url() {
   case "$BASE_URL" in
     https://github.com/*/releases/latest/download)
@@ -168,6 +192,7 @@ resolve_release_base_url() {
   esac
 }
 
+# 端口范围检查。
 validate_port() {
   value="$1"
   case "$value" in
@@ -180,6 +205,7 @@ validate_port() {
   fi
 }
 
+# 公网访问协议只允许 http / https。
 validate_scheme() {
   value="$1"
   case "$value" in
@@ -192,6 +218,7 @@ validate_scheme() {
   esac
 }
 
+# 避免 systemd unit 路径里出现空白带来的解析歧义。
 validate_no_whitespace() {
   field="$1"
   value="$2"
@@ -202,6 +229,7 @@ validate_no_whitespace() {
   esac
 }
 
+# 从已有 systemd unit 中提取 WorkingDirectory,作为升级 / 迁移的现有目录。
 detect_existing_install_root() {
   if [ -r "$UNIT_PATH" ]; then
     awk -F= '/^WorkingDirectory=/{print $2; exit}' "$UNIT_PATH"
@@ -211,6 +239,7 @@ detect_existing_install_root() {
   printf '%s' ""
 }
 
+# 把源目录下的全部内容拷到目标目录,保留点文件;源目录不存在时静默返回。
 copy_tree_contents() {
   source_dir="$1"
   target_dir="$2"
@@ -222,6 +251,7 @@ copy_tree_contents() {
   fi
 }
 
+# 极简的 TOML 取值器:仅支持 `[section]` 下的"键 = 原始值"行,够升级流程用。
 toml_get_raw() {
   file="$1"
   section="$2"
@@ -259,6 +289,7 @@ strip_toml_string_quotes() {
   printf '%s' "$value"
 }
 
+# 升级 / 迁移时从已有 server.toml 读出默认值,避免重置用户的自定义配置。
 load_existing_server_defaults() {
   config_path="$1"
   [ -f "$config_path" ] || return 0
@@ -312,6 +343,7 @@ load_existing_server_defaults() {
   [ -n "$value" ] && IGNORED_FILESYSTEMS_RAW="$value"
 }
 
+# 把交互或默认得到的变量拼成最终 server.toml 文本。
 render_server_config() {
   insecure_allow_http_value="false"
   if [ "$PUBLIC_SCHEME" = "http" ]; then

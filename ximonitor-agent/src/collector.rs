@@ -1,3 +1,9 @@
+// 主机指标采集器:负责读取 `/proc`、`statvfs` 等 Linux 内核接口,
+// 把原始数据归并成 `ximonitor-proto` 中定义的快照与身份结构。
+//
+// 仅在 Linux 上提供真正实现;其他平台编译出的存根会在调用时返回错误,
+// 使得 `cargo build` 等开发工具在 macOS / Windows 上仍能成功。
+
 #[cfg(target_os = "linux")]
 mod imp {
     use std::collections::HashSet;
@@ -14,17 +20,20 @@ mod imp {
         NodeSnapshot, percentage,
     };
 
+    /// 采集器状态:为了计算 CPU/网络的"差分速率",需要保留上一次的采样值。
     pub struct HostCollector {
         previous_cpu: Option<CpuSample>,
         previous_network: Option<NetworkSample>,
     }
 
+    /// 一次 `/proc/stat` 的聚合 CPU 计数:`total` 与 `idle` 字段之和。
     #[derive(Debug, Clone, Copy)]
     struct CpuSample {
         total: u64,
         idle: u64,
     }
 
+    /// 一次 `/proc/net/dev` 的累计计数,附带读取时刻用于计算速率。
     #[derive(Debug, Clone, Copy)]
     struct NetworkSample {
         observed_at: Instant,
@@ -32,6 +41,7 @@ mod imp {
         tx_bytes: u64,
     }
 
+    /// 仅包含累计计数的中间结构,不参与速率计算。
     #[derive(Debug, Clone, Copy)]
     struct NetworkTotals {
         rx_bytes: u64,
@@ -46,12 +56,14 @@ mod imp {
     }
 
     impl HostCollector {
+        /// 组装节点身份。`agent_version` 来源于编译期注入,运行期固定不变。
         pub fn collect_identity(
             &self,
             config: &AgentConfig,
             agent_version: &str,
         ) -> Result<NodeIdentity> {
             let uptime_secs = read_uptime("/proc/uptime")?;
+            // 由当前时刻反推启动时间,在 i64 转换溢出时退化为 i64::MAX 防止 panic。
             let boot_time =
                 Utc::now() - Duration::seconds(i64::try_from(uptime_secs).unwrap_or(i64::MAX));
 
@@ -72,6 +84,10 @@ mod imp {
             })
         }
 
+        /// 采集一张完整快照。
+        ///
+        /// 首次调用时由于没有"上一次"的数据,`cpu_usage_percent` 与网络速率
+        /// 都会返回 0 / `None`,这是符合预期的初始状态。
         pub fn collect_snapshot(&mut self) -> Result<NodeSnapshot> {
             let cpu_sample =
                 parse_cpu_sample(&fs::read_to_string("/proc/stat").context("read /proc/stat")?)?;
@@ -124,6 +140,7 @@ mod imp {
         }
     }
 
+    /// 读取文件文本并去除首尾空白。
     fn read_trimmed(path: &str) -> Result<String> {
         Ok(fs::read_to_string(path)
             .with_context(|| format!("read {path}"))?
@@ -135,6 +152,7 @@ mod imp {
         read_trimmed(path)
     }
 
+    /// 解析 `/etc/os-release`,优先返回 `PRETTY_NAME`,缺失时退化到 `NAME`。
     fn read_os_name(path: &str) -> Result<String> {
         let content = fs::read_to_string(path).with_context(|| format!("read {path}"))?;
         for line in content.lines() {
@@ -152,6 +170,7 @@ mod imp {
         value.trim_matches('"').to_string()
     }
 
+    /// 从 `/proc/cpuinfo` 中提取第一处 `model name`。
     fn read_cpu_model(path: &str) -> Result<String> {
         let content = fs::read_to_string(path).with_context(|| format!("read {path}"))?;
         for line in content.lines() {
@@ -162,6 +181,7 @@ mod imp {
         Err(anyhow!("model name not found in {path}"))
     }
 
+    /// 通过统计 `processor` 行的数量得到逻辑核心数;至少返回 1。
     fn count_cpu_cores(path: &str) -> Result<u32> {
         let content = fs::read_to_string(path).with_context(|| format!("read {path}"))?;
         let count = content
@@ -171,6 +191,7 @@ mod imp {
         Ok(u32::try_from(count).unwrap_or(u32::MAX).max(1))
     }
 
+    /// 读取 `/proc/uptime` 的整数秒部分。
     fn read_uptime(path: &str) -> Result<u64> {
         let content = fs::read_to_string(path).with_context(|| format!("read {path}"))?;
         let raw = content
@@ -186,6 +207,10 @@ mod imp {
             .with_context(|| format!("invalid uptime value in {path}"))
     }
 
+    /// 解析 `/proc/stat` 中的 `cpu ` 聚合行。
+    ///
+    /// 字段顺序:user / nice / system / idle / iowait / ...
+    /// 这里我们只关心 `total = 全部之和`,以及 `idle = idle + iowait`。
     fn parse_cpu_sample(content: &str) -> Result<CpuSample> {
         let line = content
             .lines()
@@ -205,6 +230,7 @@ mod imp {
         Ok(CpuSample { total, idle })
     }
 
+    /// 根据两次 CPU 采样的差分计算占用率(%)。
     fn compute_cpu_usage(previous: CpuSample, current: CpuSample) -> f64 {
         let total_delta = current.total.saturating_sub(previous.total);
         let idle_delta = current.idle.saturating_sub(previous.idle);
@@ -215,6 +241,7 @@ mod imp {
         percentage(busy, total_delta)
     }
 
+    /// 解析 `/proc/loadavg` 的前三个字段(1/5/15 分钟平均负载)。
     fn parse_load_average(content: &str) -> Result<LoadAverage> {
         let values: Vec<f64> = content
             .split_whitespace()
@@ -232,6 +259,9 @@ mod imp {
         })
     }
 
+    /// 解析 `/proc/meminfo`,把字段单位从 KB 转换为字节。
+    ///
+    /// `MemAvailable` 若缺失(老内核),则用 `MemFree + Buffers + Cached` 兜底。
     fn parse_memory_usage(content: &str) -> Result<MemoryUsage> {
         let mut values = std::collections::HashMap::new();
         for line in content.lines() {
@@ -277,6 +307,8 @@ mod imp {
         })
     }
 
+    /// 汇总 `/proc/net/dev` 中所有物理网卡的累计收发字节数。
+    /// 跳过 `lo`(回环口),避免本机通信被统计为外部流量。
     fn parse_network_totals(content: &str) -> Result<NetworkTotals> {
         let mut rx_bytes = 0_u64;
         let mut tx_bytes = 0_u64;
@@ -306,6 +338,8 @@ mod imp {
         Ok(NetworkTotals { rx_bytes, tx_bytes })
     }
 
+    /// 用两次采样的时间差与累计字节差,折算成每秒速率;
+    /// 计数回绕(例如代理重启)时返回 `None`,避免出现负数或荒诞峰值。
     fn compute_network_rates(
         previous: NetworkSample,
         observed_at: Instant,
@@ -325,6 +359,8 @@ mod imp {
         (rx_rate, tx_rate)
     }
 
+    /// 遍历 `/proc/mounts` 并通过 `statvfs` 获取各挂载点的容量信息。
+    /// 同一挂载点重复出现时只保留第一条;特殊虚拟文件系统会被忽略。
     fn collect_disks(mounts_path: &str) -> Result<Vec<DiskUsage>> {
         let content =
             fs::read_to_string(mounts_path).with_context(|| format!("read {mounts_path}"))?;
@@ -377,6 +413,7 @@ mod imp {
         Ok(disks)
     }
 
+    /// 默认忽略的"非物理"文件系统,这些通常代表内核虚拟视图或临时挂载。
     fn ignored_filesystems() -> &'static [&'static str] {
         &[
             "autofs",
@@ -401,6 +438,7 @@ mod imp {
         ]
     }
 
+    /// `/proc/mounts` 中的空格会被转义为 `\040`,这里还原回真实字符。
     fn unescape_mount_field(value: &str) -> String {
         value.replace("\\040", " ")
     }
@@ -411,6 +449,7 @@ mod imp {
         used_bytes: u64,
     }
 
+    /// 调用 libc 的 `statvfs` 获取挂载点容量,以字节为单位返回。
     fn statvfs(path: &str) -> Result<FilesystemStats> {
         let c_path = CString::new(path.as_bytes())
             .with_context(|| format!("path contains NUL byte: {path}"))?;
@@ -491,6 +530,7 @@ mod imp {
     }
 }
 
+// 非 Linux 平台的占位实现:保持类型与函数签名一致,运行期返回错误。
 #[cfg(not(target_os = "linux"))]
 mod imp {
     use anyhow::{Result, anyhow};

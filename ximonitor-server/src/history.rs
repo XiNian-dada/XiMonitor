@@ -1,3 +1,11 @@
+// 历史数据存储:把 `NodeStatus` 中的关键指标写入本地 SQLite 表,
+// 供前端绘制趋势图。设计目标:
+//
+// - 不阻塞实时 WebSocket 流程:所有 SQLite 调用都进入 `spawn_blocking`。
+// - 节流:同一节点两次写入至少间隔 `DEFAULT_HISTORY_WRITE_INTERVAL_SECS` 秒。
+// - 自清理:每 5 分钟最多触发一次 `DELETE`,把超过保留期的旧记录删除。
+// - 自降级:数据库初始化失败时不阻断服务,而是把 `available=false`,实时视图照常运行。
+
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -18,14 +26,19 @@ use ximonitor_proto::{
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+/// SQLite 在并发写入冲突时的等待时长。
 const SQLITE_BUSY_TIMEOUT_SECS: u64 = 5;
 
+/// 对外暴露的历史存储句柄,可被低成本克隆给多个异步任务。
 #[derive(Clone)]
 pub struct HistoryStore {
     db_path: Arc<PathBuf>,
     available: Arc<AtomicBool>,
+    /// 节点 → 上一次成功写入时间,用于实现"按时间节流"。
     last_written_at: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
+    /// 最近一次执行清理删除的时间,用于避免每次写入都触发删除。
     last_pruned_at: Arc<Mutex<Option<DateTime<Utc>>>>,
+    /// 写入互斥:多个节点的写入串行化,简化 SQLite 端的锁竞争。
     write_gate: Arc<Mutex<()>>,
 }
 
@@ -40,6 +53,7 @@ impl HistoryStore {
         }
     }
 
+    /// 初始化数据库:建表、建索引、加锁权限。失败不会抛出,仅记录警告并保持 `available=false`。
     pub async fn initialize(&self) {
         let db_path = Arc::clone(&self.db_path);
         let result = tokio::task::spawn_blocking(move || initialize_database(db_path.as_ref()))
@@ -63,6 +77,9 @@ impl HistoryStore {
         self.available.load(Ordering::Relaxed)
     }
 
+    /// 尝试把一次节点状态记录到历史表。
+    ///
+    /// 当节点首次上报、距上次写入不足节流窗口、数据库不可用时,本调用静默返回。
     pub async fn record_status(&self, status: &NodeStatus) {
         if !self.is_available() {
             return;
@@ -111,6 +128,7 @@ impl HistoryStore {
         }
     }
 
+    /// 按"过去 N 小时"窗口查询历史记录。
     pub async fn query_history(
         &self,
         node_id: &str,
@@ -134,6 +152,7 @@ impl HistoryStore {
         .context("history query task failed")?
     }
 
+    /// 按"任意时间区间"查询历史记录。超出保留期或反向区间会被自动裁剪。
     pub async fn query_history_range(
         &self,
         node_id: &str,
@@ -170,6 +189,8 @@ impl HistoryStore {
         .context("history range query task failed")?
     }
 
+    /// 判断是否需要在本次写入时附带执行一次过期记录删除。
+    /// 至少 5 分钟才会真正触发一次 DELETE。
     async fn maybe_schedule_prune(&self) -> Option<DateTime<Utc>> {
         let mut guard = self.last_pruned_at.lock().await;
         let now = Utc::now();
@@ -192,6 +213,7 @@ impl HistoryStore {
     }
 }
 
+/// 建库:如果父目录不存在则创建,然后建表 / 建索引并收紧权限。
 fn initialize_database(db_path: &PathBuf) -> Result<()> {
     if let Some(parent) = db_path.parent()
         && !parent.as_os_str().is_empty()
@@ -222,6 +244,7 @@ fn initialize_database(db_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// 写入一条历史记录,同时按需删除过期记录。
 fn write_history_point(
     db_path: &PathBuf,
     point: &HistoryPoint,
@@ -273,6 +296,7 @@ fn query_history(
     query_history_between(db_path, node_id, since, Utc::now(), max_points)
 }
 
+/// 在 `[since, until]` 之间查询某节点的历史点,并按时间升序返回。
 fn query_history_between(
     db_path: &PathBuf,
     node_id: &str,
@@ -324,6 +348,7 @@ fn query_history_between(
     Ok(condense_history_points(points, max_points))
 }
 
+/// 打开 SQLite 连接,可选启用 WAL 模式以提升并发写入吞吐。
 fn open_database_connection(db_path: &PathBuf, enable_wal: bool) -> Result<Connection> {
     let connection = Connection::open(db_path)
         .with_context(|| format!("failed to open history database {}", db_path.display()))?;
@@ -339,6 +364,7 @@ fn open_database_connection(db_path: &PathBuf, enable_wal: bool) -> Result<Conne
     Ok(connection)
 }
 
+/// 收紧主库文件以及 WAL / SHM 辅助文件的权限。
 fn harden_database_artifacts(db_path: &PathBuf) -> Result<()> {
     harden_path_permissions(db_path)?;
     for suffix in ["-wal", "-shm"] {
@@ -369,6 +395,7 @@ fn harden_path_permissions(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// 由实时 `NodeStatus` 构造一条历史采样点;若节点尚无快照则返回 `None`。
 fn build_history_point(status: &NodeStatus) -> Option<HistoryPoint> {
     let snapshot = status.snapshot.as_ref()?;
     let total_disk_bytes = snapshot
@@ -395,6 +422,7 @@ fn build_history_point(status: &NodeStatus) -> Option<HistoryPoint> {
     })
 }
 
+/// 把超出 `max_points` 的样本均匀分桶取均值,减小前端渲染开销。
 fn condense_history_points(points: Vec<HistoryPoint>, max_points: usize) -> Vec<HistoryPoint> {
     let target_points = max_points.max(1);
     if points.len() <= target_points {
@@ -411,6 +439,7 @@ fn condense_history_points(points: Vec<HistoryPoint>, max_points: usize) -> Vec<
     condensed
 }
 
+/// 对单个分桶内的样本逐字段求平均;时间戳取桶末尾,保持时间序的单调性。
 fn average_history_chunk(chunk: &[HistoryPoint]) -> HistoryPoint {
     let first = &chunk[0];
     let recorded_at = chunk

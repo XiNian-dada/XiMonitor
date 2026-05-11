@@ -1,6 +1,15 @@
+// 前端 UI 资源:
+// - `index_html` / `node_html` 把 HTML 模板和注入参数拼接后返回给浏览器;
+// - 模板内的 CSS + JavaScript 直接以 Rust 原始字符串(`r#"..."#`)内嵌,
+//   编译期不会被处理,运行期由浏览器渲染;
+// - 国际化字典放在 `assets/ui-i18n.json`,通过 `include_str!` 一并编译进二进制。
+
+/// 编译期嵌入的前端 i18n 字典,前端通过 `/assets/ui-i18n.json` 拉取。
 pub const UI_I18N_JSON: &str = include_str!("../assets/ui-i18n.json");
+/// 前端 i18n 字典对应的 HTTP 路径,统一注入到模板中。
 pub const UI_I18N_ASSET_PATH: &str = "/assets/ui-i18n.json";
 
+/// 渲染首页 HTML:把刷新间隔与 i18n 资源路径替换到模板占位符里。
 pub fn index_html(refresh_interval_secs: u64) -> String {
     INDEX_TEMPLATE
         .replace(
@@ -10,6 +19,7 @@ pub fn index_html(refresh_interval_secs: u64) -> String {
         .replace("__I18N_ASSET_PATH__", UI_I18N_ASSET_PATH)
 }
 
+/// 渲染节点详情页 HTML;额外把当前节点 ID 以 JSON 编码后嵌入模板,避免 XSS。
 pub fn node_html(node_id: &str, refresh_interval_secs: u64) -> String {
     NODE_TEMPLATE
         .replace(
@@ -282,7 +292,7 @@ const INDEX_TEMPLATE: &str = r#"<!doctype html>
         try {
           window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
         } catch (_error) {
-          // Ignore storage failures in private or restricted browsers.
+          // 在隐私模式或受限浏览器中 localStorage 可能不可用,这里静默忽略。
         }
       }
 
@@ -949,7 +959,7 @@ const NODE_TEMPLATE: &str = r#"<!doctype html>
         try {
           window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
         } catch (_error) {
-          // Ignore storage failures in private or restricted browsers.
+          // 在隐私模式或受限浏览器中 localStorage 可能不可用,这里静默忽略。
         }
       }
 

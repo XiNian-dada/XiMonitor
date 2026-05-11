@@ -1,8 +1,17 @@
+# Agent 配置示例。各字段语义见 ximonitor-proto/src/config.rs 中的 AgentConfig。
+
 [agent]
+# 节点唯一标识(ASCII 字母/数字/-_.,最长 128 字符),用于 Server 端识别和路由。
 node_id = "hk-01"
+# 节点展示名,显示在前端列表与详情页。
 node_label = "Hong Kong 01"
+# Server WebSocket 接入点,生产环境必须使用 wss://。
 server = "wss://monitor.example.com/ws"
+# 由 Server 通过 `install-agent` 等命令颁发的长期 token,与 node_id 配对使用。
 token = "issued-by-ximonitor-server"
+# 上报间隔(秒),决定前端最快多久能看到一次刷新。
 report_interval_secs = 5
+# 可选:覆盖 /proc/sys/kernel/hostname,适用于容器或匿名化部署。
 hostname_override = "hk-01.internal"
+# 可选:节点标签,前端可据此分组过滤。
 tags = ["apac", "edge"]

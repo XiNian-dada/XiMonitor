@@ -1,3 +1,13 @@
+// 服务端共享状态:在内存中维护节点身份、最新快照与会话生命周期。
+//
+// `SharedState` 通过 `Arc<RwLock<Registry>>` 在多个异步任务之间共享:
+//   - WebSocket 处理任务写入最新快照、延迟值和在线状态;
+//   - HTTP API 任务读取整体视图;
+//   - 后台任务定期把超时节点标记为离线、把状态持久化到磁盘。
+//
+// 设计要点:用单调递增的 `session_id` 区分同一节点的多次连接,避免"旧会话"
+// 的延迟数据覆盖"新会话"的最新数据。
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -7,6 +17,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 use ximonitor_proto::{NodeIdentity, NodeSnapshot, NodeStatus, OverviewData, ServerConfig};
 
+/// 共享状态的对外句柄,可以低成本地克隆给每个异步任务。
 #[derive(Clone)]
 pub struct SharedState {
     config: Arc<ServerConfig>,
@@ -27,6 +38,8 @@ impl SharedState {
         self.config.as_ref()
     }
 
+    /// 登记一个新的 WebSocket 会话并返回唯一的 `session_id`。
+    /// 同一节点重连时会得到比上次更大的 ID,从而抢占老的会话。
     pub async fn register_node(&self, identity: NodeIdentity) -> u64 {
         let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
         let now = Utc::now();
@@ -35,6 +48,7 @@ impl SharedState {
         session_id
     }
 
+    /// 更新某节点的最新快照。若该会话已被新会话替代,则返回 `None` 告知调用方丢弃。
     pub async fn update_snapshot(
         &self,
         node_id: &str,
@@ -45,16 +59,19 @@ impl SharedState {
         registry.update_snapshot(node_id, session_id, snapshot, Utc::now())
     }
 
+    /// 更新某节点的最新延迟值,语义同 `update_snapshot`。
     pub async fn update_latency(&self, node_id: &str, session_id: u64, latency_ms: u64) -> bool {
         let mut registry = self.registry.write().await;
         registry.update_latency(node_id, session_id, latency_ms, Utc::now())
     }
 
+    /// 标记某会话的连接已断开。如果当前活跃 ID 不再等于该会话,则什么也不做。
     pub async fn mark_disconnected(&self, node_id: &str, session_id: u64) {
         let mut registry = self.registry.write().await;
         registry.mark_disconnected(node_id, session_id);
     }
 
+    /// 把超时(超过 `stale_after_secs`)的节点统一标记为离线,返回受影响节点数。
     pub async fn mark_stale(&self) -> usize {
         let mut registry = self.registry.write().await;
         registry.mark_stale(
@@ -63,11 +80,13 @@ impl SharedState {
         )
     }
 
+    /// 判断给定 `session_id` 是否仍是该节点的当前会话。
     pub async fn is_current_session(&self, node_id: &str, session_id: u64) -> bool {
         let registry = self.registry.read().await;
         registry.is_current_session(node_id, session_id)
     }
 
+    /// 列出所有节点的状态(按 `node_label`、`node_id` 升序)。
     pub async fn list_statuses(&self) -> Vec<NodeStatus> {
         let registry = self.registry.read().await;
         registry.list_statuses()
@@ -78,11 +97,13 @@ impl SharedState {
         registry.get_status(node_id)
     }
 
+    /// 生成全局概览数据,用于仪表盘顶部的统计卡片。
     pub async fn overview(&self) -> OverviewData {
         let registry = self.registry.read().await;
         registry.overview()
     }
 
+    /// 启动时从磁盘快照恢复状态,所有节点都视为离线直至首次心跳到达。
     pub async fn restore_statuses(&self, statuses: Vec<NodeStatus>) {
         let mut registry = self.registry.write().await;
         registry.restore_statuses(statuses);
@@ -94,6 +115,7 @@ struct Registry {
     nodes: HashMap<String, NodeEntry>,
 }
 
+/// 单节点的注册项:对外暴露的 `status` 与内部的"当前活跃会话 ID"。
 #[derive(Debug, Clone)]
 struct NodeEntry {
     status: NodeStatus,
@@ -114,6 +136,7 @@ impl Registry {
             active_session_id: Some(session_id),
         });
 
+        // 已存在的节点也要把身份与会话 ID 刷新成"最新连接"的版本。
         entry.status.identity = identity;
         entry.status.online = true;
         entry.status.last_seen = Some(now);
@@ -267,6 +290,7 @@ impl Registry {
     fn restore_statuses(&mut self, statuses: Vec<NodeStatus>) {
         self.nodes.clear();
         for mut status in statuses {
+            // 重启后所有节点的真实状态都未知,统一标记为离线,等心跳到达后再上线。
             status.online = false;
             let node_id = status.identity.node_id.clone();
             self.nodes.insert(
@@ -280,6 +304,7 @@ impl Registry {
     }
 }
 
+/// 把浮点数累加器中的非法值(NaN / 负值 / 溢出)安全过滤掉。
 fn sum_finite_f64(total: f64, value: f64) -> f64 {
     if !value.is_finite() || value < 0.0 {
         return total;

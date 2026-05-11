@@ -1,20 +1,36 @@
 #!/bin/sh
+# XiMonitor Agent 一键安装 / 升级脚本。
+#
+# 主要流程:
+#   1. 解析命令行参数与环境变量,确认目标架构与下载源。
+#   2. 创建专用服务用户、目录,并按需调用引导接口拉取 agent.toml。
+#   3. 校验二进制 SHA-256,落盘到 /usr/local/bin,并写入 systemd unit。
+#   4. 可选写入"每日自动升级"的 timer + 一次性服务。
+#
+# 该脚本设计为可被 `curl ... | sh` 直接执行,所以全部用 POSIX shell 实现,
+# 不依赖 bash 特性。所有失败都通过 `fail` 输出统一前缀并以非零状态退出。
+
 set -eu
+# 默认 umask:确保新建的临时文件不会泄漏给同主机其它用户。
 umask 077
 
+# 统一的错误输出函数,前缀方便日志检索。
 fail() {
   printf '%s\n' "install-agent: $*" >&2
   exit 1
 }
 
+# 检查依赖命令是否存在,缺失则直接退出。
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
+# 对参数进行 POSIX shell 安全的单引号转义,适合嵌入到 systemd 单元等场景。
 shell_quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\"'\"'/g")"
 }
 
+# ---- 命令行 / 环境变量入参 ----
 BOOTSTRAP_URL=""
 INSTALL_TOKEN="${XIMONITOR_AGENT_INSTALL_TOKEN:-}"
 INSTALL_TOKEN_FILE="${XIMONITOR_AGENT_INSTALL_TOKEN_FILE:-}"
@@ -41,6 +57,7 @@ BOOTSTRAP_TMP=""
 CURL_AUTH_CONFIG=""
 CHECKSUMS_TMP=""
 
+# 退出时清理临时文件,确保不会残留含 token 的内容。
 cleanup() {
   [ -n "$TMP_PATH" ] && rm -f "$TMP_PATH"
   [ -n "$BOOTSTRAP_TMP" ] && rm -f "$BOOTSTRAP_TMP"
@@ -50,6 +67,7 @@ cleanup() {
 
 trap cleanup EXIT HUP INT TERM
 
+# 计算指定文件的 SHA-256 摘要;优先用 GNU `sha256sum`,缺失时回退到 `shasum -a 256`。
 calculate_sha256() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | sed 's/[[:space:]].*$//'
@@ -62,6 +80,7 @@ calculate_sha256() {
   fail "missing required command: sha256sum or shasum"
 }
 
+# 解析 nologin / false 之类的"禁用登录 shell",供创建服务用户时使用。
 resolve_nologin_shell() {
   if command -v nologin >/dev/null 2>&1; then
     command -v nologin
@@ -86,6 +105,7 @@ resolve_nologin_shell() {
   fail "unable to find a nologin shell for the service user"
 }
 
+# 确保系统中存在用于运行 Agent 的专用账户;不存在则创建。
 ensure_service_account() {
   if id -u "$SERVICE_USER" >/dev/null 2>&1; then
     return 0
@@ -108,6 +128,7 @@ ensure_service_account() {
   fail "missing required command: useradd or adduser"
 }
 
+# 通过 /dev/tty 提示用户手动输入一次性安装令牌,输入过程中关闭回显。
 prompt_install_token() {
   need_cmd stty
   [ -r /dev/tty ] || fail "missing install token and no interactive terminal is available"
@@ -122,6 +143,7 @@ prompt_install_token() {
   printf '\n' >/dev/tty
 }
 
+# 按优先级加载安装令牌:文件 > 环境变量 > 交互输入。
 load_install_token() {
   if [ -n "$INSTALL_TOKEN_FILE" ]; then
     [ -r "$INSTALL_TOKEN_FILE" ] || fail "install token file is not readable: $INSTALL_TOKEN_FILE"
@@ -133,6 +155,7 @@ load_install_token() {
   [ -n "$INSTALL_TOKEN" ] || fail "install token must not be empty"
 }
 
+# 把 Authorization 头写入 curl 的配置文件,避免它出现在 `ps` 中。
 write_curl_auth_config() {
   cat >"$CURL_AUTH_CONFIG" <<EOF
 header = "Authorization: Bearer $INSTALL_TOKEN"
@@ -140,6 +163,7 @@ EOF
   chmod 0600 "$CURL_AUTH_CONFIG"
 }
 
+# 拉取引导接口返回的 agent.toml,并做简单的内容自检。
 fetch_bootstrap_config() {
   [ -n "$BOOTSTRAP_URL" ] || fail "missing --bootstrap-url"
   load_install_token
@@ -151,6 +175,7 @@ fetch_bootstrap_config() {
   grep -q '^token = "' "$BOOTSTRAP_TMP" || fail "bootstrap response did not contain an agent token"
 }
 
+# 解析发布源对应的 SHA256SUMS.txt,挑出当前架构产物的预期摘要。
 fetch_expected_sha256() {
   artifact_name="$1"
 
@@ -181,6 +206,7 @@ fetch_expected_sha256() {
   [ -n "$EXPECTED_SHA256" ] || fail "missing checksum entry for $artifact_name"
 }
 
+# 把 `releases/latest/download` 形式的下载源解析成具体 tag,避免每次升级又跳到最新版。
 resolve_release_base_url() {
   case "$BASE_URL" in
     https://github.com/*/releases/latest/download)
@@ -206,6 +232,7 @@ resolve_release_base_url() {
   esac
 }
 
+# 推导"自动升级时使用的脚本 URL";尽量重用 latest 通道,使自动升级总能拉到新版。
 derive_update_script_url() {
   case "$UPDATE_BASE_URL" in
     https://github.com/*/releases/latest/download)
@@ -230,6 +257,7 @@ derive_update_script_url() {
   printf '%s/install-agent.sh' "${UPDATE_BASE_URL%/}"
 }
 
+# 在 /usr/local/bin 下生成自动升级辅助脚本,内部调用本脚本的 upgrade 模式。
 write_auto_update_helper() {
   update_script_url="$1"
 
@@ -254,6 +282,7 @@ write_auto_update_helper() {
   chmod 0755 "$AUTO_UPDATE_HELPER_PATH"
 }
 
+# 根据 AUTO_UPDATE 开关创建或删除自动升级所需的 systemd unit 与 timer。
 configure_auto_update() {
   case "$AUTO_UPDATE" in
     enable)

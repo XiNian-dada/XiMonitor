@@ -1,3 +1,4 @@
+# 持续集成工作流:每次推送到 main 或提交 PR 时运行,负责风格检查、单测与跨平台构建。
 name: CI
 
 on:
@@ -17,20 +18,24 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Rust
+        # 安装最小化的 stable 工具链,并加上 clippy / rustfmt 组件。
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup component add clippy rustfmt
 
       - name: Install shellcheck
+        # 用于检查 install-*.sh 中是否存在 POSIX shell 风险写法。
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck
 
       - name: Check formatting
+        # 严格校验 cargo fmt 的格式约定,任何差异都会失败。
         run: cargo fmt --all --check
 
       - name: Run clippy
+        # 使用 --locked + 把所有 warning 当作错误,避免在 CI 中悄悄引入新警告。
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Run tests
@@ -40,6 +45,7 @@ jobs:
         run: shellcheck scripts/install-server.sh scripts/install-agent.sh
 
   cross-build:
+    # 跨平台构建:确保发布前 musl 目标都能编译通过。
     name: Cross Build ${{ matrix.target }}
     needs: lint-and-test
     runs-on: ubuntu-latest
@@ -60,9 +66,11 @@ jobs:
           rustup default stable
 
       - name: Install cross
+        # 使用 cross 容器化交叉编译,免去手动准备 musl sysroot。
         run: cargo install cross --locked
 
       - name: Disable local linker overrides for CI cross build
+        # 本地 .cargo/config.toml 里写死了 rust-lld 路径,CI 镜像里没有,所以临时改名。
         run: |
           if [ -f .cargo/config.toml ]; then
             mv .cargo/config.toml .cargo/config.toml.ci-bak
