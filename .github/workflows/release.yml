@@ -53,6 +53,31 @@ jobs:
           workspaces: |
             . -> target
 
+      - name: Stamp workspace version from tag
+        # Make Cargo metadata and build logs show the released tag version,
+        # not the static development placeholder from the repository.
+        env:
+          RELEASE_TAG_NAME: ${{ env.RELEASE_TAG }}
+        run: |
+          RELEASE_VERSION="${RELEASE_TAG_NAME#v}"
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          release_version = os.environ["RELEASE_VERSION"]
+          cargo_toml = Path("Cargo.toml")
+          content = cargo_toml.read_text()
+          pattern = re.compile(
+              r"(\[workspace\.package\]\s+version\s*=\s*\")([^\"]+)(\")",
+              re.MULTILINE,
+          )
+          updated, count = pattern.subn(rf"\g<1>{release_version}\g<3>", content, count=1)
+          if count != 1:
+              raise SystemExit("failed to stamp workspace.package.version in Cargo.toml")
+          cargo_toml.write_text(updated)
+          PY
+
       - name: Install cross
         uses: taiki-e/install-action@cross
 
