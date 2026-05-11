@@ -193,13 +193,15 @@ const MAX_OUTSTANDING_PINGS: usize = 32;
 /// 不安全传输警告的输出间隔(秒)。
 const INSECURE_TRANSPORT_WARN_INTERVAL_SECS: u64 = 900;
 /// 历史采样中允许的最大磁盘条目数,防止恶意 Agent 制造海量条目。
-const MAX_SANITIZED_DISKS: usize = 128;
+const MAX_SANITIZED_DISKS: usize = 64;
 /// 单个磁盘字段(device/mount_point/fs_type)允许的最大字节数,防止 Agent 上报巨型字符串撑爆 UI 与历史库。
 const MAX_SANITIZED_STRING_BYTES: usize = 256;
 /// 网络速率字段的合法上限(字节/秒)。
 const MAX_SANITIZED_RATE_BYTES_PER_SEC: f64 = 1_000_000_000_000.0;
 /// 负载平均数的合法上限。
 const MAX_SANITIZED_LOAD: f64 = 1_000_000.0;
+/// 单个 WebSocket 会话中允许出现的异常 metrics 报告次数,超过即主动断开。
+const METRIC_ANOMALY_SESSION_LIMIT: u32 = 5;
 /// 历史接口默认查询窗口(小时)。
 const DEFAULT_HISTORY_WINDOW_HOURS: u64 = 24;
 /// 历史接口默认返回的样本点数。
@@ -836,6 +838,7 @@ async fn handle_socket(
         let mut ping_ticker = interval(ping_every);
         let mut outstanding_pings: HashMap<u64, Instant> = HashMap::new();
         let mut next_ping_nonce = 1_u64;
+        let mut metric_anomaly_count = 0_u32;
 
         loop {
             tokio::select! {
@@ -854,7 +857,27 @@ async fn handle_socket(
                                     warn!(node_id = %node_id, "disconnecting session after registry token change");
                                     break Ok(());
                                 }
-                                let snapshot = sanitize_snapshot(shared.config(), snapshot);
+                                let (snapshot, report) = sanitize_snapshot(shared.config(), snapshot);
+                                if report.modified() {
+                                    metric_anomaly_count =
+                                        next_metric_anomaly_count(metric_anomaly_count, &report);
+                                    warn!(
+                                        node_id = %node_id,
+                                        session_id,
+                                        anomalies = report.total(),
+                                        anomaly_count = metric_anomaly_count,
+                                        "agent reported out-of-range metrics; clamped before persistence",
+                                    );
+                                    if should_disconnect_for_metric_anomalies(metric_anomaly_count) {
+                                        warn!(
+                                            node_id = %node_id,
+                                            session_id,
+                                            limit = METRIC_ANOMALY_SESSION_LIMIT,
+                                            "disconnecting session after repeated metric anomalies",
+                                        );
+                                        break Ok(());
+                                    }
+                                }
                                 let Some(status) = shared.update_snapshot(&node_id, session_id, snapshot).await else {
                                     warn!(node_id = %node_id, session_id, "dropping metrics from superseded session");
                                     break Ok(());
@@ -1174,30 +1197,93 @@ async fn restore_snapshot_if_available(shared: &SharedState, path: &Path) {
 
 /// 对来自 Agent 的快照进行二次校验。
 /// 把所有疑似越界的字段统一约束到合法范围,避免它们污染 UI 汇总、聚合或历史表。
-fn sanitize_snapshot(config: &ServerConfig, mut snapshot: NodeSnapshot) -> NodeSnapshot {
+///
+/// 返回值中的 `SanitizationReport` 记录了本次清洗触发的各类异常计数,
+/// 上层会话循环据此输出告警并在异常持续时主动断开连接。
+fn sanitize_snapshot(
+    config: &ServerConfig,
+    mut snapshot: NodeSnapshot,
+) -> (NodeSnapshot, SanitizationReport) {
     // Agent 是不受信任的数据源:在进入聚合 / 历史表前,把不可能值卡到上限,
     // 否则它们会扭曲仪表盘汇总、压垮加和、或污染历史样本。
-    snapshot.cpu_usage_percent = sanitize_percentage(snapshot.cpu_usage_percent);
-    snapshot.load = sanitize_load_average(snapshot.load);
-    snapshot.memory = sanitize_memory_usage(snapshot.memory);
-    snapshot.network = sanitize_network_counters(snapshot.network);
-    snapshot.disks = snapshot
-        .disks
-        .into_iter()
-        .filter(|disk| {
-            !config
-                .ignored_filesystems
-                .iter()
-                .any(|fs| fs == &disk.fs_type)
-        })
-        .filter_map(sanitize_disk_usage)
-        .take(MAX_SANITIZED_DISKS)
-        .collect();
-    snapshot
+    let mut report = SanitizationReport::default();
+    snapshot.cpu_usage_percent =
+        sanitize_percentage(snapshot.cpu_usage_percent, &mut report.clamped_percents);
+    snapshot.load = sanitize_load_average(snapshot.load, &mut report);
+    snapshot.memory = sanitize_memory_usage(snapshot.memory, &mut report);
+    snapshot.network = sanitize_network_counters(snapshot.network, &mut report);
+    let mut sanitized_disks = Vec::new();
+    for disk in snapshot.disks {
+        if config
+            .ignored_filesystems
+            .iter()
+            .any(|fs| fs == &disk.fs_type)
+        {
+            continue;
+        }
+
+        let Some(disk) = sanitize_disk_usage(disk, &mut report) else {
+            continue;
+        };
+        if sanitized_disks.len() >= MAX_SANITIZED_DISKS {
+            report.dropped_disks = report.dropped_disks.saturating_add(1);
+            continue;
+        }
+        sanitized_disks.push(disk);
+    }
+    snapshot.disks = sanitized_disks;
+    (snapshot, report)
 }
 
-fn sanitize_percentage(value: f64) -> f64 {
-    sanitize_non_negative_f64(value, 100.0)
+/// 记录一次 `sanitize_snapshot` 期间各类清洗操作的发生次数。
+///
+/// 字段都按"被改动的次数"计;上层只关心 `modified()` 与各字段非零情况,
+/// 不依赖于精确次数语义,所以使用 `saturating_add` 即可。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct SanitizationReport {
+    clamped_percents: u32,
+    clamped_loads: u32,
+    clamped_memory_bytes: u32,
+    clamped_disk_bytes: u32,
+    truncated_strings: u32,
+    dropped_disks: u32,
+    sanitized_rates: u32,
+}
+
+impl SanitizationReport {
+    fn total(&self) -> u32 {
+        self.clamped_percents
+            .saturating_add(self.clamped_loads)
+            .saturating_add(self.clamped_memory_bytes)
+            .saturating_add(self.clamped_disk_bytes)
+            .saturating_add(self.truncated_strings)
+            .saturating_add(self.dropped_disks)
+            .saturating_add(self.sanitized_rates)
+    }
+
+    fn modified(&self) -> bool {
+        self.total() > 0
+    }
+}
+
+fn next_metric_anomaly_count(current_count: u32, report: &SanitizationReport) -> u32 {
+    if report.modified() {
+        current_count.saturating_add(1)
+    } else {
+        current_count
+    }
+}
+
+fn should_disconnect_for_metric_anomalies(metric_anomaly_count: u32) -> bool {
+    metric_anomaly_count >= METRIC_ANOMALY_SESSION_LIMIT
+}
+
+fn sanitize_percentage(value: f64, counter: &mut u32) -> f64 {
+    let sanitized = sanitize_non_negative_f64(value, 100.0);
+    if value != sanitized {
+        *counter = counter.saturating_add(1);
+    }
+    sanitized
 }
 
 fn sanitize_non_negative_f64(value: f64, max: f64) -> f64 {
@@ -1211,15 +1297,27 @@ fn sanitize_non_negative_f64(value: f64, max: f64) -> f64 {
     value.min(max)
 }
 
-fn sanitize_load_average(load: LoadAverage) -> LoadAverage {
+fn sanitize_load_average(load: LoadAverage, report: &mut SanitizationReport) -> LoadAverage {
     LoadAverage {
-        one: sanitize_non_negative_f64(load.one, MAX_SANITIZED_LOAD),
-        five: sanitize_non_negative_f64(load.five, MAX_SANITIZED_LOAD),
-        fifteen: sanitize_non_negative_f64(load.fifteen, MAX_SANITIZED_LOAD),
+        one: sanitize_load_value(load.one, &mut report.clamped_loads),
+        five: sanitize_load_value(load.five, &mut report.clamped_loads),
+        fifteen: sanitize_load_value(load.fifteen, &mut report.clamped_loads),
     }
 }
 
-fn sanitize_memory_usage(mut memory: MemoryUsage) -> MemoryUsage {
+fn sanitize_load_value(value: f64, counter: &mut u32) -> f64 {
+    let sanitized = sanitize_non_negative_f64(value, MAX_SANITIZED_LOAD);
+    if value != sanitized {
+        *counter = counter.saturating_add(1);
+    }
+    sanitized
+}
+
+fn sanitize_memory_usage(mut memory: MemoryUsage, report: &mut SanitizationReport) -> MemoryUsage {
+    let original_used = memory.used_bytes;
+    let original_available = memory.available_bytes;
+    let original_swap_used = memory.swap_used_bytes;
+
     memory.used_bytes = memory.used_bytes.min(memory.total_bytes);
     memory.available_bytes = memory.available_bytes.min(memory.total_bytes);
     if memory.used_bytes.saturating_add(memory.available_bytes) > memory.total_bytes {
@@ -1228,41 +1326,83 @@ fn sanitize_memory_usage(mut memory: MemoryUsage) -> MemoryUsage {
     }
 
     memory.swap_used_bytes = memory.swap_used_bytes.min(memory.swap_total_bytes);
+
+    if memory.used_bytes != original_used
+        || memory.available_bytes != original_available
+        || memory.swap_used_bytes != original_swap_used
+    {
+        report.clamped_memory_bytes = report.clamped_memory_bytes.saturating_add(1);
+    }
     memory
 }
 
-fn sanitize_disk_usage(mut disk: DiskUsage) -> Option<DiskUsage> {
+fn sanitize_disk_usage(mut disk: DiskUsage, report: &mut SanitizationReport) -> Option<DiskUsage> {
     disk.device = disk.device.trim().to_string();
     disk.mount_point = disk.mount_point.trim().to_string();
     disk.fs_type = disk.fs_type.trim().to_string();
     if disk.device.is_empty() || disk.mount_point.is_empty() || disk.fs_type.is_empty() {
+        report.dropped_disks = report.dropped_disks.saturating_add(1);
         return None;
     }
     // 字符串字段做硬截断,避免 Agent 上报巨型字符串污染 UI 或历史库。
+    let original_device_len = disk.device.len();
+    let original_mount_len = disk.mount_point.len();
+    let original_fs_len = disk.fs_type.len();
     truncate_to_byte_boundary(&mut disk.device, MAX_SANITIZED_STRING_BYTES);
     truncate_to_byte_boundary(&mut disk.mount_point, MAX_SANITIZED_STRING_BYTES);
     truncate_to_byte_boundary(&mut disk.fs_type, MAX_SANITIZED_STRING_BYTES);
+    if disk.device.len() != original_device_len
+        || disk.mount_point.len() != original_mount_len
+        || disk.fs_type.len() != original_fs_len
+    {
+        report.truncated_strings = report.truncated_strings.saturating_add(1);
+    }
 
+    let original_used = disk.used_bytes;
+    let original_available = disk.available_bytes;
     disk.available_bytes = disk.available_bytes.min(disk.total_bytes);
     disk.used_bytes = disk.used_bytes.min(disk.total_bytes);
     if disk.used_bytes.saturating_add(disk.available_bytes) > disk.total_bytes {
         // 当两个字段相互矛盾时,以 available 为基线重算 used,得到自洽的 used 部分。
         disk.used_bytes = disk.total_bytes.saturating_sub(disk.available_bytes);
     }
-    disk.used_percent = sanitize_percentage(percentage(disk.used_bytes, disk.total_bytes));
+    if disk.used_bytes != original_used || disk.available_bytes != original_available {
+        report.clamped_disk_bytes = report.clamped_disk_bytes.saturating_add(1);
+    }
+    // 这里 percentage() 输入是已被裁剪过的 u64,理论上不会越界;
+    // 用 sanitize_percentage 仍能在未来字段语义改变时兜底,并保持 used_percent 与 used_bytes 自洽。
+    disk.used_percent = sanitize_percentage(
+        percentage(disk.used_bytes, disk.total_bytes),
+        &mut report.clamped_percents,
+    );
     Some(disk)
 }
 
-fn sanitize_network_counters(mut network: NetworkCounters) -> NetworkCounters {
-    network.rx_bytes_per_sec =
-        sanitize_optional_rate(network.rx_bytes_per_sec, MAX_SANITIZED_RATE_BYTES_PER_SEC);
-    network.tx_bytes_per_sec =
-        sanitize_optional_rate(network.tx_bytes_per_sec, MAX_SANITIZED_RATE_BYTES_PER_SEC);
+fn sanitize_network_counters(
+    mut network: NetworkCounters,
+    report: &mut SanitizationReport,
+) -> NetworkCounters {
+    network.rx_bytes_per_sec = sanitize_optional_rate(
+        network.rx_bytes_per_sec,
+        MAX_SANITIZED_RATE_BYTES_PER_SEC,
+        &mut report.sanitized_rates,
+    );
+    network.tx_bytes_per_sec = sanitize_optional_rate(
+        network.tx_bytes_per_sec,
+        MAX_SANITIZED_RATE_BYTES_PER_SEC,
+        &mut report.sanitized_rates,
+    );
     network
 }
 
-fn sanitize_optional_rate(value: Option<f64>, max: f64) -> Option<f64> {
-    value.map(|value| sanitize_non_negative_f64(value, max))
+fn sanitize_optional_rate(value: Option<f64>, max: f64, counter: &mut u32) -> Option<f64> {
+    value.map(|v| {
+        let sanitized = sanitize_non_negative_f64(v, max);
+        if v != sanitized {
+            *counter = counter.saturating_add(1);
+        }
+        sanitized
+    })
 }
 
 /// 把字符串截到不超过 `max_bytes` 字节,且必须落在 UTF-8 字符边界上。
@@ -1321,11 +1461,13 @@ mod tests {
     use tokio::runtime::Runtime;
 
     use super::{
-        AppState, MAX_SANITIZED_LOAD, MAX_SANITIZED_RATE_BYTES_PER_SEC,
-        MAX_SANITIZED_STRING_BYTES, ReadonlyRouteAuth, WsAdmissionController, WsAdmissionError,
-        bootstrap, healthz, index, install_agent_script, install_bootstrap, node_detail,
+        AppState, MAX_SANITIZED_DISKS, MAX_SANITIZED_LOAD, MAX_SANITIZED_RATE_BYTES_PER_SEC,
+        MAX_SANITIZED_STRING_BYTES, METRIC_ANOMALY_SESSION_LIMIT, ReadonlyRouteAuth,
+        SanitizationReport, WsAdmissionController, WsAdmissionError, bootstrap, healthz, index,
+        install_agent_script, install_bootstrap, next_metric_anomaly_count, node_detail,
         node_history, node_status, nodes, overview, resolve_client_ip, sanitize_snapshot,
-        truncate_to_byte_boundary, ui_i18n_asset, uses_insecure_remote_public_base_url, ws_handler,
+        should_disconnect_for_metric_anomalies, truncate_to_byte_boundary, ui_i18n_asset,
+        uses_insecure_remote_public_base_url, ws_handler,
     };
     use crate::history::HistoryStore;
     use crate::registry::NodeRegistry;
@@ -1521,9 +1663,8 @@ mod tests {
             },
         };
 
-        let sanitized = sanitize_snapshot(&config, snapshot);
+        let (sanitized, report) = sanitize_snapshot(&config, snapshot);
         assert_eq!(sanitized.cpu_usage_percent, 100.0);
-        assert_eq!(sanitized.load.one, 0.0);
         assert_eq!(sanitized.load.five, 0.0);
         assert_eq!(sanitized.load.fifteen, MAX_SANITIZED_LOAD);
         assert_eq!(sanitized.memory.used_bytes, 100);
@@ -1540,6 +1681,13 @@ mod tests {
         assert_eq!(sanitized.disks[0].fs_type, "ext4");
         assert_eq!(sanitized.disks[0].used_bytes, 20);
         assert_eq!(sanitized.disks[0].used_percent, 20.0);
+        assert_eq!(report.clamped_percents, 1);
+        assert_eq!(report.clamped_loads, 3);
+        assert_eq!(report.clamped_memory_bytes, 1);
+        assert_eq!(report.clamped_disk_bytes, 1);
+        assert_eq!(report.dropped_disks, 1);
+        assert_eq!(report.sanitized_rates, 2);
+        assert!(report.modified());
     }
 
     #[test]
@@ -1602,11 +1750,88 @@ mod tests {
             },
         };
 
-        let sanitized = sanitize_snapshot(&config, snapshot);
+        let (sanitized, report) = sanitize_snapshot(&config, snapshot);
         assert_eq!(sanitized.disks.len(), 1);
         assert!(sanitized.disks[0].device.len() <= MAX_SANITIZED_STRING_BYTES);
         assert!(sanitized.disks[0].mount_point.len() <= MAX_SANITIZED_STRING_BYTES);
         assert!(sanitized.disks[0].fs_type.len() <= MAX_SANITIZED_STRING_BYTES);
+        assert_eq!(report.truncated_strings, 1);
+        assert!(report.modified());
+    }
+
+    #[test]
+    fn sanitize_snapshot_caps_disk_count_and_tracks_clean_reports() {
+        let config = ServerConfig {
+            listen: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
+            public_base_url: "http://127.0.0.1:8080".to_string(),
+            insecure_allow_http: false,
+            readonly_auth: None,
+            ws: WsConfig {
+                max_total_connections: 32,
+                max_connections_per_ip: 8,
+                auth_fail_window_secs: 300,
+                auth_fail_max_attempts: 6,
+                auth_block_secs: 600,
+            },
+            node_registry_path: PathBuf::from("./data/server.json"),
+            history_db_path: PathBuf::from("./data/history.sqlite3"),
+            snapshot_path: PathBuf::from("./data/snapshot.json"),
+            stale_after_secs: 15,
+            ping_interval_secs: 5,
+            max_message_bytes: 64 * 1024,
+            refresh_interval_secs: 5,
+            ignored_filesystems: Vec::new(),
+            agent_release_base_url: None,
+            agent_release_sha256_x86_64: None,
+            agent_release_sha256_aarch64: None,
+        };
+        let disks = (0..(MAX_SANITIZED_DISKS + 3))
+            .map(|index| ximonitor_proto::DiskUsage {
+                device: format!("/dev/vd{index}"),
+                mount_point: format!("/mnt/{index}"),
+                fs_type: "ext4".to_string(),
+                total_bytes: 100,
+                available_bytes: 40,
+                used_bytes: 60,
+                used_percent: 60.0,
+            })
+            .collect();
+        let snapshot = NodeSnapshot {
+            collected_at: Utc::now(),
+            cpu_usage_percent: 10.0,
+            load: ximonitor_proto::LoadAverage {
+                one: 0.5,
+                five: 0.7,
+                fifteen: 0.9,
+            },
+            memory: ximonitor_proto::MemoryUsage {
+                total_bytes: 100,
+                used_bytes: 60,
+                available_bytes: 40,
+                swap_total_bytes: 10,
+                swap_used_bytes: 5,
+            },
+            uptime_secs: 1,
+            disks,
+            network: ximonitor_proto::NetworkCounters {
+                total_rx_bytes: 1,
+                total_tx_bytes: 2,
+                rx_bytes_per_sec: Some(3.0),
+                tx_bytes_per_sec: Some(4.0),
+            },
+        };
+
+        let (sanitized, report) = sanitize_snapshot(&config, snapshot);
+        assert_eq!(sanitized.disks.len(), MAX_SANITIZED_DISKS);
+        assert_eq!(report.dropped_disks, 3);
+        assert!(report.modified());
+
+        let clean_report = SanitizationReport::default();
+        assert_eq!(next_metric_anomaly_count(2, &clean_report), 2);
+        assert!(!should_disconnect_for_metric_anomalies(4));
+        assert!(should_disconnect_for_metric_anomalies(
+            METRIC_ANOMALY_SESSION_LIMIT
+        ));
     }
 
     #[test]
