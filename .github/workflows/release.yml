@@ -46,12 +46,22 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+          workspaces: |
+            . -> target
+
       - name: Install cross
-        run: cargo install cross --locked
+        uses: taiki-e/install-action@cross
 
       - name: Disable local linker overrides for CI cross build
         # 与 CI 工作流相同:暂时挪开本地的 linker 配置,避免与 cross 容器冲突。
-        run: mv .cargo/config.toml .cargo/config.toml.ci-bak
+        run: |
+          if [ -f .cargo/config.toml ]; then
+            mv .cargo/config.toml .cargo/config.toml.ci-bak
+          fi
 
       - name: Build release binaries
         # 通过 XIMONITOR_BUILD_VERSION 把 tag 注入二进制,便于运行时打印版本号。

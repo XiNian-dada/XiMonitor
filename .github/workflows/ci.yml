@@ -24,6 +24,13 @@ jobs:
           rustup default stable
           rustup component add clippy rustfmt
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-lint-and-test
+          workspaces: |
+            . -> target
+
       - name: Install shellcheck
         # 用于检查 install-*.sh 中是否存在 POSIX shell 风险写法。
         run: |
@@ -65,9 +72,16 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-cross-${{ matrix.target }}
+          workspaces: |
+            . -> target
+
       - name: Install cross
         # 使用 cross 容器化交叉编译,免去手动准备 musl sysroot。
-        run: cargo install cross --locked
+        uses: taiki-e/install-action@cross
 
       - name: Disable local linker overrides for CI cross build
         # 本地 .cargo/config.toml 里写死了 rust-lld 路径,CI 镜像里没有,所以临时改名。
