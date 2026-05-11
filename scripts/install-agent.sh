@@ -265,8 +265,8 @@ write_auto_update_helper() {
     printf '%s\n' '#!/bin/sh'
     printf '%s\n' 'set -eu'
     printf 'curl -fsSL %s | \\\n' "$(shell_quote "$update_script_url")"
-    printf '%s\n' '  XIMONITOR_AGENT_MODE=upgrade \'
-    printf '%s\n' '  sh -s -- \'
+    printf "%s\n" '  XIMONITOR_AGENT_MODE=upgrade \'
+    printf "%s\n" '  sh -s -- \'
     printf '  --mode upgrade \\\n'
     printf '  --install-dir %s \\\n' "$(shell_quote "$INSTALL_DIR")"
     printf '  --config-dir %s \\\n' "$(shell_quote "$CONFIG_DIR")"
