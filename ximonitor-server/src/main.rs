@@ -2113,10 +2113,7 @@ mod tests {
             "x-forwarded-for",
             "8.8.8.8, 1.1.1.1".parse().expect("header value"),
         );
-        headers.insert(
-            "x-real-ip",
-            "198.51.100.24".parse().expect("header value"),
-        );
+        headers.insert("x-real-ip", "198.51.100.24".parse().expect("header value"));
 
         let client_ip = resolve_client_ip(
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
