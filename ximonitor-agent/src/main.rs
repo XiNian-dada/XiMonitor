@@ -20,8 +20,9 @@ use clap::Parser;
 use futures::{SinkExt, StreamExt};
 use tokio::fs;
 use tokio::time::{interval, sleep, timeout};
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tracing::{info, warn};
 use url::Url;
 use ximonitor_proto::{
@@ -35,6 +36,12 @@ use crate::collector::new_collector;
 const INSECURE_TRANSPORT_WARN_INTERVAL_SECS: u64 = 900;
 /// 建立 WebSocket 连接时的超时阈值(秒)。
 const CONNECT_TIMEOUT_SECS: u64 = 20;
+/// 允许接收的单条 WebSocket 消息上限(字节)。
+///
+/// 服务端只会向 Agent 下发 Ping 与 ServerNotice 这两种短消息,正常体量不超过
+/// 几百字节;这里收紧到 64 KiB,既给协议未来扩展留出余量,又能在被攻陷的
+/// 服务端推送超大帧时由底层库主动断开,而不是让 Agent 在帧拼接阶段 OOM。
+const MAX_INCOMING_MESSAGE_BYTES: usize = 64 * 1024;
 
 /// 命令行参数。
 #[derive(Debug, Parser)]
@@ -168,7 +175,7 @@ async fn run_session(
 ) -> std::result::Result<(), SessionError> {
     let (socket, _) = timeout(
         Duration::from_secs(CONNECT_TIMEOUT_SECS),
-        connect_async(config.server.as_str()),
+        connect_async_with_config(config.server.as_str(), Some(incoming_ws_config()), false),
     )
     .await
     .map_err(|_| session_error(false, anyhow!("timed out connecting to {}", config.server)))?
@@ -259,6 +266,14 @@ fn session_error(established_session: bool, source: anyhow::Error) -> SessionErr
         established_session,
         source,
     }
+}
+
+/// 构造接收侧的 WebSocket 配置:把单帧与单消息上限收紧到 `MAX_INCOMING_MESSAGE_BYTES`,
+/// 防止被攻陷的服务端通过下发巨型帧把 Agent 进程拖到 OOM。
+fn incoming_ws_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_frame_size(Some(MAX_INCOMING_MESSAGE_BYTES))
+        .max_message_size(Some(MAX_INCOMING_MESSAGE_BYTES))
 }
 
 /// 采集一次快照并以 `Metrics` 帧发送出去。
