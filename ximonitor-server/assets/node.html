@@ -1416,13 +1416,23 @@
         const tooltip = root.querySelector(".chart-tooltip");
         if (!svg || !layer || !line || !tooltip || !Array.isArray(plot.series)) return;
         const nearestPoint = (points, viewX) => {
-          let best = null;
-          for (const point of points) {
-            if (!best || Math.abs(point.x - viewX) < Math.abs(best.x - viewX)) best = point;
+          if (points.length === 0) return null;
+          let lo = 0, hi = points.length - 1;
+          while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (points[mid].x < viewX) lo = mid + 1; else hi = mid;
           }
-          return best;
+          const right = points[lo];
+          const left = lo > 0 ? points[lo - 1] : right;
+          return Math.abs(right.x - viewX) < Math.abs(left.x - viewX) ? right : left;
         };
-        root.onpointermove = (event) => {
+        let pendingEvent = null;
+        let rafId = null;
+        const handleMove = () => {
+          rafId = null;
+          const event = pendingEvent;
+          pendingEvent = null;
+          if (!event) return;
           const rect = root.getBoundingClientRect();
           if (rect.width <= 0 || rect.height <= 0) return;
           const viewX = Math.min(plot.width, Math.max(0, ((event.clientX - rect.left) / rect.width) * plot.width));
@@ -1460,7 +1470,13 @@
           tooltip.hidden = false;
           layer.setAttribute("opacity", "1");
         };
+        root.onpointermove = (event) => {
+          pendingEvent = event;
+          if (rafId == null) rafId = window.requestAnimationFrame(handleMove);
+        };
         root.onpointerleave = () => {
+          if (rafId != null) { window.cancelAnimationFrame(rafId); rafId = null; }
+          pendingEvent = null;
           layer.setAttribute("opacity", "0");
           tooltip.hidden = true;
         };
