@@ -364,11 +364,17 @@
         gap: 12px;
       }
       .chart-axis {
-        display: flex;
-        justify-content: space-between;
+        position: relative;
+        height: 14px;
         font-size: 10px;
         color: var(--text-dim);
-        padding-top: 4px;
+        margin-top: 4px;
+      }
+      .chart-axis span {
+        position: absolute;
+        top: 0;
+        transform: translateX(-50%);
+        white-space: nowrap;
       }
 
       .small-card { display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; }
@@ -1639,13 +1645,21 @@
         }
         const padLeft = chartPadLeft(kind);
         const padRight = 14;
-        root.style.paddingLeft = padLeft + "px";
-        root.style.paddingRight = padRight + "px";
+        const { width } = chartDimensions(root);
+        const plotWidth = Math.max(1, width - padLeft - padRight);
+        const targetSpacing = 140;
+        const tickCount = Math.min(8, Math.max(2, Math.round(plotWidth / targetSpacing) + 1));
         const fmt = (ts) => new Date(ts).toLocaleTimeString(currentLanguage, { hour: "2-digit", minute: "2-digit" });
-        const first = history[0]._ts;
-        const last = history[history.length - 1]._ts;
-        const mid = history[Math.floor(history.length / 2)]._ts;
-        root.innerHTML = `<span>${fmt(first)}</span><span>${fmt(mid)}</span><span>${fmt(last)}</span>`;
+        const lastIdx = history.length - 1;
+        const parts = [];
+        for (let i = 0; i < tickCount; i++) {
+          const ratio = tickCount === 1 ? 0 : i / (tickCount - 1);
+          const idx = Math.round(ratio * lastIdx);
+          const xPx = padLeft + ratio * plotWidth;
+          const leftPct = (xPx / width) * 100;
+          parts.push(`<span style="left:${leftPct.toFixed(3)}%">${escapeHtml(fmt(history[idx]._ts))}</span>`);
+        }
+        root.innerHTML = parts.join("");
       }
 
       // ---------------- Monitor tab: history brush ----------------
