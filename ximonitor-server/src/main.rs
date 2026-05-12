@@ -1313,7 +1313,14 @@ async fn handle_socket(
                 "websocket authentication rejected",
             );
             state.ws_admission.record_auth_failure(client_ip);
-            return Err(ProtocolError::Client("unauthorized".to_string()));
+
+            // 检查是否是 token 过期错误,如果是则返回具体错误信息
+            let error_msg = error.to_string();
+            if error_msg.contains("token expired") {
+                return Err(ProtocolError::Client("token expired".to_string()));
+            } else {
+                return Err(ProtocolError::Client("unauthorized".to_string()));
+            }
         }
     };
     state.ws_admission.clear_auth_failures(client_ip);
