@@ -34,6 +34,9 @@ const SQLITE_BUSY_TIMEOUT_SECS: u64 = 5;
 pub struct HistoryStore {
     db_path: Arc<PathBuf>,
     available: Arc<AtomicBool>,
+    /// 持久化 SQLite 连接,避免每次写入都重新打开 + 重设 PRAGMA。
+    /// 用 `Option` 包裹是因为 `initialize()` 前连接尚未建立。
+    connection: Arc<Mutex<Option<Connection>>>,
     /// 节点 → 上一次成功写入时间,用于实现"按时间节流"。
     last_written_at: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
     /// 最近一次执行清理删除的时间,用于避免每次写入都触发删除。
@@ -47,6 +50,7 @@ impl HistoryStore {
         Self {
             db_path: Arc::new(db_path),
             available: Arc::new(AtomicBool::new(false)),
+            connection: Arc::new(Mutex::new(None)),
             last_written_at: Arc::new(Mutex::new(HashMap::new())),
             last_pruned_at: Arc::new(Mutex::new(None)),
             write_gate: Arc::new(Mutex::new(())),
@@ -61,7 +65,9 @@ impl HistoryStore {
             .context("history database task failed");
 
         match result {
-            Ok(Ok(())) => {
+            Ok(Ok(connection)) => {
+                let mut guard = self.connection.lock().await;
+                *guard = Some(connection);
                 self.available.store(true, Ordering::Relaxed);
             }
             Ok(Err(error)) => {
@@ -108,9 +114,14 @@ impl HistoryStore {
 
         let prune_before = self.maybe_schedule_prune().await;
         let db_path = Arc::clone(&self.db_path);
+        let connection_arc = Arc::clone(&self.connection);
         let point_for_task = point.clone();
         let result = tokio::task::spawn_blocking(move || {
-            write_history_point(db_path.as_ref(), &point_for_task, prune_before)
+            let guard = connection_arc.blocking_lock();
+            let Some(ref connection) = *guard else {
+                anyhow::bail!("history connection not initialized");
+            };
+            write_history_point(db_path.as_ref(), connection, &point_for_task, prune_before)
         })
         .await;
 
@@ -139,14 +150,18 @@ impl HistoryStore {
             return Ok(Vec::new());
         }
 
-        let db_path = Arc::clone(&self.db_path);
+        let connection_arc = Arc::clone(&self.connection);
         let node_id = node_id.to_string();
         let clamped_window_hours = window_hours.clamp(1, DEFAULT_HISTORY_RETENTION_HOURS);
         let clamped_max_points = max_points.max(60);
         let since = Utc::now() - chrono::Duration::hours(clamped_window_hours as i64);
 
         tokio::task::spawn_blocking(move || {
-            query_history(db_path.as_ref(), &node_id, since, clamped_max_points)
+            let guard = connection_arc.blocking_lock();
+            let Some(ref connection) = *guard else {
+                anyhow::bail!("history connection not initialized");
+            };
+            query_history(connection, &node_id, since, clamped_max_points)
         })
         .await
         .context("history query task failed")?
@@ -172,13 +187,17 @@ impl HistoryStore {
             return Ok(Vec::new());
         }
 
-        let db_path = Arc::clone(&self.db_path);
+        let connection_arc = Arc::clone(&self.connection);
         let node_id = node_id.to_string();
         let clamped_max_points = max_points.max(60);
 
         tokio::task::spawn_blocking(move || {
+            let guard = connection_arc.blocking_lock();
+            let Some(ref connection) = *guard else {
+                anyhow::bail!("history connection not initialized");
+            };
             query_history_between(
-                db_path.as_ref(),
+                connection,
                 &node_id,
                 clamped_start,
                 clamped_end,
@@ -214,7 +233,8 @@ impl HistoryStore {
 }
 
 /// 建库:如果父目录不存在则创建,然后建表 / 建索引并收紧权限。
-fn initialize_database(db_path: &PathBuf) -> Result<()> {
+/// 返回已配置好的持久化连接(WAL 模式 + busy_timeout),供后续写入/查询复用。
+fn initialize_database(db_path: &PathBuf) -> Result<Connection> {
     if let Some(parent) = db_path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -241,16 +261,16 @@ fn initialize_database(db_path: &PathBuf) -> Result<()> {
     )?;
     harden_database_artifacts(db_path)?;
 
-    Ok(())
+    Ok(connection)
 }
 
-/// 写入一条历史记录,同时按需删除过期记录。
+/// 写入一条历史记录,同时按需删除过期记录。复用已打开的连接,避免重复 open + PRAGMA。
 fn write_history_point(
     db_path: &PathBuf,
+    connection: &Connection,
     point: &HistoryPoint,
     prune_before: Option<DateTime<Utc>>,
 ) -> Result<()> {
-    let connection = open_database_connection(db_path, true)?;
     connection.execute(
         r#"
         INSERT INTO history_points (
@@ -288,23 +308,22 @@ fn write_history_point(
 }
 
 fn query_history(
-    db_path: &PathBuf,
+    connection: &Connection,
     node_id: &str,
     since: DateTime<Utc>,
     max_points: usize,
 ) -> Result<Vec<HistoryPoint>> {
-    query_history_between(db_path, node_id, since, Utc::now(), max_points)
+    query_history_between(connection, node_id, since, Utc::now(), max_points)
 }
 
 /// 在 `[since, until]` 之间查询某节点的历史点,并按时间升序返回。
 fn query_history_between(
-    db_path: &PathBuf,
+    connection: &Connection,
     node_id: &str,
     since: DateTime<Utc>,
     until: DateTime<Utc>,
     max_points: usize,
 ) -> Result<Vec<HistoryPoint>> {
-    let connection = open_database_connection(db_path, false)?;
     let mut statement = connection.prepare(
         r#"
         SELECT
@@ -572,9 +591,10 @@ mod tests {
             std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
             let db_path = temp_dir.join("history.sqlite3");
 
-            initialize_database(&db_path).expect("database should initialize");
+            let connection = initialize_database(&db_path).expect("database should initialize");
             write_history_point(
                 &db_path,
+                &connection,
                 &HistoryPoint {
                     node_id: "hk-01".to_string(),
                     recorded_at: Utc::now(),
