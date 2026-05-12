@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
     }
 
     spawn_insecure_transport_warning(config.server.clone());
-    run_forever(config, collector, identity).await
+    run_forever(config, collector, identity, cli.config).await
 }
 
 /// 安装 rustls 默认的密码套件提供者(ring 后端)。
@@ -175,12 +175,13 @@ async fn run_forever(
     config: AgentConfig,
     mut collector: crate::collector::HostCollector,
     identity: ximonitor_proto::NodeIdentity,
+    config_path: PathBuf,
 ) -> Result<()> {
     let mut attempt = 0_u32;
 
     loop {
         let next = async {
-            match run_session(&config, &mut collector, &identity).await {
+            match run_session(&config, &mut collector, &identity, &config_path).await {
                 Ok(()) => {
                     attempt = 0;
                 }
@@ -220,6 +221,7 @@ async fn run_session(
     config: &AgentConfig,
     collector: &mut crate::collector::HostCollector,
     identity: &ximonitor_proto::NodeIdentity,
+    config_path: &Path,
 ) -> std::result::Result<(), SessionError> {
     let (socket, _) = timeout(
         Duration::from_secs(CONNECT_TIMEOUT_SECS),
@@ -279,11 +281,34 @@ async fn run_session(
                                 {
                                     authenticated = true;
                                 }
+
+                                // 检测 token 过期错误
+                                if matches!(level, NoticeLevel::Error) && message.contains("token expired") {
+                                    warn!("token expired, requesting refresh");
+                                    let refresh_request = WireMessage::RefreshTokenRequest(
+                                        ximonitor_proto::RefreshTokenRequestMessage {
+                                            node_id: config.node_id.clone(),
+                                        }
+                                    );
+                                    let json = serde_json::to_string(&refresh_request)
+                                        .context("failed to serialize refresh request")
+                                        .map_err(|error| session_error(authenticated, error))?;
+                                    sender.send(Message::Text(json.into())).await
+                                        .context("failed to send refresh request")
+                                        .map_err(|error| session_error(authenticated, error))?;
+                                }
+
                                 log_notice(level, &message);
                             }
                             WireMessage::RefreshTokenResponse(response) => {
                                 info!("received new token, expires at {}", response.expires_at);
-                                // TODO: 将新 token 持久化到配置文件
+
+                                // 持久化新 token 到配置文件
+                                if let Err(e) = update_token_in_config(config_path, &response.new_token).await {
+                                    warn!("failed to persist new token: {}", e);
+                                } else {
+                                    info!("successfully persisted new token to config file");
+                                }
                             }
                             WireMessage::Hello(_)
                             | WireMessage::Metrics(_)
@@ -453,6 +478,48 @@ fn host_is_local(host: Option<&str>) -> bool {
     host.parse::<std::net::IpAddr>()
         .map(|ip| ip.is_loopback())
         .unwrap_or(false)
+}
+
+/// 更新配置文件中的 token。
+///
+/// 读取现有配置文件,替换 `token = "..."` 行,然后原子性写回。
+async fn update_token_in_config(config_path: &Path, new_token: &str) -> Result<()> {
+    // 读取现有配置
+    let content = fs::read_to_string(config_path)
+        .await
+        .context("failed to read config file")?;
+
+    // 替换 token 行
+    let mut updated_lines = Vec::new();
+    let mut token_updated = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("token") && trimmed.contains('=') {
+            // 替换 token 行,保留原有缩进
+            let indent = line.len() - line.trim_start().len();
+            updated_lines.push(format!("{}token = \"{}\"", " ".repeat(indent), new_token));
+            token_updated = true;
+        } else {
+            updated_lines.push(line.to_string());
+        }
+    }
+
+    if !token_updated {
+        anyhow::bail!("token field not found in config file");
+    }
+
+    // 原子性写回:先写临时文件,再 rename
+    let temp_path = config_path.with_extension("tmp");
+    fs::write(&temp_path, updated_lines.join("\n") + "\n")
+        .await
+        .context("failed to write temp config file")?;
+
+    fs::rename(&temp_path, config_path)
+        .await
+        .context("failed to rename temp config file")?;
+
+    Ok(())
 }
 
 #[cfg(test)]
