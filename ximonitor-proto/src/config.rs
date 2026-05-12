@@ -194,6 +194,9 @@ struct RawWsSection {
 struct RawAuthSection {
     username: Option<String>,
     password: Option<String>,
+    #[serde(default)]
+    enable_2fa: bool,
+    totp_secret: Option<String>,
 }
 
 impl Default for RawUiSection {
@@ -307,6 +310,22 @@ impl RawServerConfigFile {
                 "install.agent_release_sha256_x86_64 and install.agent_release_sha256_aarch64 are required when install.agent_release_base_url is configured",
             ));
         }
+        let enable_2fa = self.auth.enable_2fa;
+        let totp_secret = self.auth.totp_secret.map(|value| value.trim().to_string());
+        if enable_2fa && self.auth.username.is_none() {
+            return Err(ConfigError::new(
+                "auth.username and auth.password are required when auth.enable_2fa = true",
+            ));
+        }
+        if enable_2fa && totp_secret.as_deref().is_none_or(str::is_empty) {
+            return Err(ConfigError::new(
+                "auth.totp_secret is required when auth.enable_2fa = true",
+            ));
+        }
+        if let Some(secret) = totp_secret.as_deref() {
+            validate_totp_secret("auth.totp_secret", secret)?;
+        }
+
         // 用户名与密码必须成对出现:任意一个单独存在都视为配置错误。
         let readonly_auth = match (
             self.auth.username.map(|value| value.trim().to_string()),
@@ -318,8 +337,8 @@ impl RawServerConfigFile {
                 Some(ReadonlyAuthConfig {
                     username,
                     password,
-                    enable_2fa: false,
-                    totp_secret: None,
+                    enable_2fa,
+                    totp_secret,
                 })
             }
             (None, None) => None,
@@ -533,6 +552,24 @@ fn validate_sha256(field: &str, value: &str) -> Result<(), ConfigError> {
     if value.len() != 64 || !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
         return Err(ConfigError::new(format!(
             "{field} must be a 64-character hexadecimal SHA-256 digest"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_totp_secret(field: &str, value: &str) -> Result<(), ConfigError> {
+    validate_non_empty(field, value)?;
+    let normalized = value.replace(' ', "").to_ascii_uppercase();
+    let decoded = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, &normalized)
+        .or_else(|| base32::decode(base32::Alphabet::Rfc4648 { padding: true }, &normalized));
+    let Some(decoded) = decoded else {
+        return Err(ConfigError::new(format!(
+            "{field} must be a valid RFC4648 base32 TOTP secret"
+        )));
+    };
+    if decoded.len() < 10 {
+        return Err(ConfigError::new(format!(
+            "{field} must decode to at least 10 bytes"
         )));
     }
     Ok(())
