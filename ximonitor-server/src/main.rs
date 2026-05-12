@@ -273,9 +273,12 @@ impl InstallAdmissionController {
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, InstallAdmissionState> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state.lock().unwrap_or_else(|poisoned| {
+            tracing::error!(
+                "InstallAdmissionController mutex poisoned; recovering with stale state"
+            );
+            poisoned.into_inner()
+        })
     }
 }
 
@@ -478,9 +481,10 @@ impl WsAdmissionController {
 
     /// 锁住状态;锁中毒时取出受污染状态继续,因为不愿意因此让整个服务崩溃。
     fn lock_state(&self) -> std::sync::MutexGuard<'_, WsAdmissionState> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state.lock().unwrap_or_else(|poisoned| {
+            tracing::error!("WsAdmissionController mutex poisoned; recovering with stale state");
+            poisoned.into_inner()
+        })
     }
 }
 
