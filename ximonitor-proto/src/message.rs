@@ -21,6 +21,10 @@ pub enum WireMessage {
     Pong(PongMessage),
     /// Server 推送给 Agent 的告知性消息(认证成功、错误提示等)。
     ServerNotice(ServerNoticeMessage),
+    /// Agent 请求刷新即将过期的 Token。
+    RefreshTokenRequest(RefreshTokenRequestMessage),
+    /// Server 响应 Token 刷新请求,返回新 Token 和过期时间。
+    RefreshTokenResponse(RefreshTokenResponseMessage),
 }
 
 /// Agent 连接 Server 时发送的首个消息。
@@ -55,6 +59,19 @@ pub struct PongMessage {
 pub struct ServerNoticeMessage {
     pub level: NoticeLevel,
     pub message: String,
+}
+
+/// Agent 请求刷新 Token(当 Token 即将过期时)。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RefreshTokenRequestMessage {
+    pub node_id: String,
+}
+
+/// Server 响应 Token 刷新请求。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RefreshTokenResponseMessage {
+    pub new_token: String,
+    pub expires_at: String, // ISO 8601 格式
 }
 
 /// 通知级别,与常见的日志等级对应。

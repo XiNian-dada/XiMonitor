@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use axum::extract::ConnectInfo;
 use axum::extract::Query;
 use axum::extract::Request;
@@ -48,8 +48,8 @@ use tracing::{error, info, warn};
 use url::Url;
 use ximonitor_proto::{
     DiskUsage, HelloMessage, LoadAverage, MemoryUsage, MetricsMessage, NetworkCounters,
-    NodeSnapshot, PingMessage, PongMessage, ReadonlyAuthConfig, ServerConfig, ServerNoticeMessage,
-    WireMessage, WsConfig, parse_server_config, percentage,
+    NodeSnapshot, PingMessage, PongMessage, ReadonlyAuthConfig, ServerConfig,
+    ServerNoticeMessage, WireMessage, WsConfig, parse_server_config, percentage,
 };
 
 use crate::history::HistoryStore;
@@ -517,6 +517,12 @@ async fn run_server(config_path: &Path) -> Result<()> {
     let public_base_url = config.public_base_url.clone();
     let refresh_interval_secs = config.refresh_interval_secs;
     let readonly_route_auth = ReadonlyRouteAuth::from_config(config.readonly_auth.clone());
+
+    // 密码强度检查:如果启用了认证,验证密码是否满足最低安全要求
+    if let Some(ref auth_config) = config.readonly_auth {
+        validate_password_strength(&auth_config.password)?;
+    }
+
     let registry = NodeRegistry::load(config.node_registry_path.as_path())
         .await
         .with_context(|| {
@@ -695,6 +701,38 @@ async fn issue_node_bundle(
         install_script_url,
         agent_release_base_url,
     })
+}
+
+/// 验证密码强度:至少 8 字符,包含字母和数字。
+/// 如果密码过弱,返回错误并给出建议。
+fn validate_password_strength(password: &str) -> Result<()> {
+    const MIN_LENGTH: usize = 8;
+
+    if password.len() < MIN_LENGTH {
+        bail!(
+            "READONLY_PASSWORD is too short ({} chars). Minimum {} characters required.\n\
+             Recommendation: Use a strong random password, e.g.:\n  \
+             export READONLY_PASSWORD=\"$(openssl rand -base64 24)\"",
+            password.len(),
+            MIN_LENGTH
+        );
+    }
+
+    let has_letter = password.chars().any(|c| c.is_alphabetic());
+    let has_digit = password.chars().any(|c| c.is_ascii_digit());
+
+    if !has_letter || !has_digit {
+        warn!(
+            "READONLY_PASSWORD does not meet recommended strength (letters + digits).\n\
+             Current password: {} letters, {} digits.\n\
+             Recommendation: Use a strong random password, e.g.:\n  \
+             export READONLY_PASSWORD=\"$(openssl rand -base64 24)\"",
+            if has_letter { "has" } else { "no" },
+            if has_digit { "has" } else { "no" }
+        );
+    }
+
+    Ok(())
 }
 
 /// 加载并解析 server.toml,顺带对 snapshot / history 目录的不存在情况发出提醒。
@@ -1193,6 +1231,44 @@ async fn handle_socket(
                             }
                             WireMessage::ServerNotice(_) => {
                                 break Err(ProtocolError::Client("agent must not send server_notice messages".to_string()));
+                            }
+                            WireMessage::RefreshTokenRequest(request) => {
+                                if request.node_id != node_id {
+                                    break Err(ProtocolError::Client("refresh token request node_id mismatch".to_string()));
+                                }
+                                match state.registry.refresh_token(&node_id).await {
+                                    Ok((new_token, expires_at)) => {
+                                        let response = WireMessage::RefreshTokenResponse(
+                                            ximonitor_proto::RefreshTokenResponseMessage {
+                                                new_token,
+                                                expires_at: expires_at.to_rfc3339(),
+                                            },
+                                        );
+                                        let payload = serde_json::to_string(&response)
+                                            .map_err(|error| anyhow!("failed to serialize refresh response: {error}"))?;
+                                        sender
+                                            .send(Message::Text(payload.into()))
+                                            .await
+                                            .map_err(|error| anyhow!("failed to send refresh response: {error}"))?;
+                                        info!(node_id = %node_id, "token refreshed successfully");
+                                    }
+                                    Err(error) => {
+                                        warn!(node_id = %node_id, error = ?error, "failed to refresh token");
+                                        let notice = WireMessage::ServerNotice(ServerNoticeMessage {
+                                            level: ximonitor_proto::NoticeLevel::Error,
+                                            message: "Failed to refresh token".to_string(),
+                                        });
+                                        let payload = serde_json::to_string(&notice)
+                                            .map_err(|error| anyhow!("failed to serialize notice: {error}"))?;
+                                        sender
+                                            .send(Message::Text(payload.into()))
+                                            .await
+                                            .map_err(|error| anyhow!("failed to send notice: {error}"))?;
+                                    }
+                                }
+                            }
+                            WireMessage::RefreshTokenResponse(_) => {
+                                break Err(ProtocolError::Client("agent must not send refresh_token_response messages".to_string()));
                             }
                         },
                     }

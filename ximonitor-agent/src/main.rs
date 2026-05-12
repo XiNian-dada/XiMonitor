@@ -281,7 +281,14 @@ async fn run_session(
                                 }
                                 log_notice(level, &message);
                             }
-                            WireMessage::Hello(_) | WireMessage::Metrics(_) | WireMessage::Pong(_) => {
+                            WireMessage::RefreshTokenResponse(response) => {
+                                info!("received new token, expires at {}", response.expires_at);
+                                // TODO: 将新 token 持久化到配置文件
+                            }
+                            WireMessage::Hello(_)
+                            | WireMessage::Metrics(_)
+                            | WireMessage::Pong(_)
+                            | WireMessage::RefreshTokenRequest(_) => {
                                 return Err(session_error(
                                     authenticated,
                                     anyhow!("received unexpected websocket message from server"),

@@ -27,6 +27,9 @@ use ximonitor_proto::NodeIdentity;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+/// Agent Token 默认有效期:90 天。
+const DEFAULT_TOKEN_VALIDITY_DAYS: i64 = 90;
+
 /// 已登记节点的持久化条目。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegisteredNode {
@@ -36,6 +39,9 @@ pub struct RegisteredNode {
     #[serde(default)]
     pub tags: Vec<String>,
     pub created_at: DateTime<Utc>,
+    /// Token 过期时间。None 表示永不过期(向后兼容旧版本注册表)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_expires_at: Option<DateTime<Utc>>,
 }
 
 /// 安装会话:由 CLI 颁发的一次性令牌,Agent 用它拉取自己的配置。
@@ -117,6 +123,32 @@ impl NodeRegistry {
     pub async fn is_token_current(&self, node_id: &str, token: &str) -> bool {
         let state = self.state.read().await;
         is_token_current(&state.entries, node_id, token)
+    }
+
+    /// 刷新节点的 Token:生成新 Token 并延长过期时间。
+    /// 返回 (new_token, expires_at)。
+    pub async fn refresh_token(&self, node_id: &str) -> Result<(String, DateTime<Utc>)> {
+        let path = Arc::clone(&self.path);
+        let node_id = node_id.to_string();
+        let ((new_token, expires_at), _) = mutate_registry_file(path.as_ref(), move |file| {
+            let now = Utc::now();
+            let Some(node) = file.nodes.iter_mut().find(|n| n.node_id == node_id) else {
+                bail!("node not found");
+            };
+
+            let new_token = generate_token()?;
+            let expires_at = now + ChronoDuration::days(DEFAULT_TOKEN_VALIDITY_DAYS);
+            node.token = new_token.clone();
+            node.token_expires_at = Some(expires_at);
+
+            Ok(((new_token, expires_at), true))
+        })
+        .await?;
+
+        // 刷新内存中的状态
+        self.reload().await?;
+
+        Ok((new_token, expires_at))
     }
 
     /// 从磁盘重新加载注册表。返回 `Ok(true)` 表示发现了变化。
@@ -205,6 +237,7 @@ pub async fn issue_node(path: &Path, request: IssueNodeRequest) -> Result<IssueN
             }
             if request.rotate_token {
                 file.nodes[index].token = generate_token()?;
+                file.nodes[index].token_expires_at = Some(now + ChronoDuration::days(DEFAULT_TOKEN_VALIDITY_DAYS));
                 rotated_token = true;
             }
 
@@ -235,6 +268,7 @@ pub async fn issue_node(path: &Path, request: IssueNodeRequest) -> Result<IssueN
             token: generate_token()?,
             tags: normalize_string_list(request.tags.clone()),
             created_at: now,
+            token_expires_at: Some(now + ChronoDuration::days(DEFAULT_TOKEN_VALIDITY_DAYS)),
         };
         validate_registered_node(&node)?;
 
@@ -704,6 +738,13 @@ fn authorize_identity(
             bail!("unauthorized");
         }
 
+        // 检查 token 是否过期
+        if let Some(expires_at) = entry.token_expires_at
+            && Utc::now() >= expires_at
+        {
+            bail!("token expired");
+        }
+
         let mut identity = identity.clone();
         identity.node_id = entry.node_id.clone();
         identity.node_label = entry.node_label.clone();
@@ -856,6 +897,7 @@ mod tests {
                     token: "secret".to_string(),
                     tags: vec!["edge".to_string()],
                     created_at: Utc::now(),
+                    token_expires_at: None,
                 }],
                 install_sessions: Vec::new(),
             };
@@ -1099,6 +1141,7 @@ mod tests {
                     token: "secret".to_string(),
                     tags: vec![],
                     created_at: Utc::now(),
+                    token_expires_at: None,
                 }],
                 install_sessions: Vec::new(),
             };

@@ -15,8 +15,8 @@ pub use config::{
     WsConfig, parse_agent_config, parse_server_config,
 };
 pub use message::{
-    HelloMessage, MetricsMessage, NoticeLevel, PingMessage, PongMessage, ServerNoticeMessage,
-    WireMessage,
+    HelloMessage, MetricsMessage, NoticeLevel, PingMessage, PongMessage, RefreshTokenRequestMessage,
+    RefreshTokenResponseMessage, ServerNoticeMessage, WireMessage,
 };
 pub use model::{
     DiskUsage, HistoryPoint, LoadAverage, MemoryUsage, NetworkCounters, NodeIdentity, NodeSnapshot,
