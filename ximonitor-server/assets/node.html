@@ -274,7 +274,7 @@
       .panel-head {
         display: flex;
         justify-content: space-between;
-        align-items: center;
+        align-items: flex-start;
         gap: 12px;
         margin-bottom: 12px;
       }
@@ -282,16 +282,24 @@
         font-size: 14px;
         font-weight: 600;
         color: var(--text-secondary);
+        line-height: 1.35;
+        min-width: 0;
       }
       .panel-meta {
-        font-size: 18px;
+        font-size: 15px;
         font-weight: 600;
         color: var(--text-primary);
+        line-height: 1.35;
+        text-align: right;
+        white-space: nowrap;
       }
       .panel-actions {
         display: inline-flex;
         align-items: center;
+        justify-content: flex-end;
+        flex-wrap: wrap;
         gap: 8px;
+        min-width: 0;
       }
 
       /* Server info card spans 2 rows */
@@ -518,9 +526,16 @@
         border: 1px solid var(--border-soft);
         border-radius: 16px;
         padding: 16px 18px;
-        min-height: 240px;
+        min-height: 230px;
         display: flex;
         flex-direction: column;
+      }
+      .network-chart-card {
+        margin-top: 14px;
+        min-height: 220px;
+      }
+      .network-chart-card .chart-stage {
+        min-height: 170px;
       }
 
       .disks { padding: 16px 20px; }
@@ -816,12 +831,12 @@
               <div class="value" id="net-latency">--</div>
             </article>
           </div>
-          <article class="panel chart-card" style="margin-top:14px;min-height:280px">
+          <article class="panel chart-card network-chart-card">
             <div class="panel-head">
               <div class="panel-title" data-i18n="node.network_traffic">Network Traffic</div>
               <button type="button" class="chart-clip-toggle" data-clip-chart="network"></button>
             </div>
-            <div class="chart-stage" id="network-only-chart" style="min-height:240px"></div>
+            <div class="chart-stage" id="network-only-chart"></div>
           </article>
         </section>
 
@@ -1075,6 +1090,9 @@
         if (name === "monitor") {
           renderBrushOverview();
           renderBigCharts(displayedHistory());
+        }
+        if (name === "network") {
+          renderOverviewCharts(displayedHistory());
         }
       }
 
@@ -1345,13 +1363,22 @@
         const v = Math.min(Math.max(Number(value), bounds.displayMin), bounds.displayMax);
         return height - padBottom - ((v - bounds.displayMin) / span) * (height - padTop - padBottom);
       }
+      function chartDimensions(root, options = {}) {
+        const rect = root.getBoundingClientRect();
+        const measuredWidth = Math.round(rect.width || root.clientWidth || 0);
+        const measuredHeight = Math.round(rect.height || root.clientHeight || 0);
+        return {
+          width: Math.max(280, Math.round(measuredWidth || options.width || 600)),
+          height: Math.max(64, Math.round(measuredHeight || options.height || 180)),
+        };
+      }
       function chartGridMarkup(bounds, width, height, padLeft, padRight, padTop, padBottom, kind) {
         const ticks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => bounds.displayMin + (bounds.displayMax - bounds.displayMin) * ratio);
         return ticks.map((tick) => {
           const y = chartY(tick, bounds, height, padTop, padBottom);
           return `
             <line x1="${padLeft}" x2="${width - padRight}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="currentColor" stroke-opacity="0.09" stroke-width="1" />
-            <text x="${padLeft - 8}" y="${(y + 3).toFixed(1)}" text-anchor="end" fill="currentColor" opacity="0.58" font-size="10">${escapeHtml(formatChartValue(tick, kind))}</text>
+            <text x="${padLeft - 8}" y="${(y + 3).toFixed(1)}" text-anchor="end" fill="currentColor" opacity="0.64" font-size="11">${escapeHtml(formatChartValue(tick, kind))}</text>
           `;
         }).join("");
       }
@@ -1362,7 +1389,7 @@
         const label = escapeHtml(formatChartValue(avg, kind));
         return `
           <line x1="${padLeft}" x2="${width - padRight}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="${color}" stroke-opacity="${opacity}" stroke-width="1.2" stroke-dasharray="6 5" />
-          <text x="${width - padRight - 4}" y="${(y - 4).toFixed(1)}" text-anchor="end" fill="${color}" opacity="0.78" font-size="10">${label}</text>
+          <text x="${width - padRight - 4}" y="${(y - 4).toFixed(1)}" text-anchor="end" fill="${color}" opacity="0.78" font-size="11">${label}</text>
         `;
       }
       function installChartHover(root, plot) {
@@ -1456,9 +1483,8 @@
         const values = numeric.map((p) => Number(p.value));
         const kind = options.valueKind || "number";
         const bounds = chartDisplayBounds(values, options);
-        const width = options.width || 600;
-        const height = options.height || 180;
-        const padLeft = options.padLeft || 48;
+        const { width, height } = chartDimensions(root, options);
+        const padLeft = options.padLeft || 56;
         const padRight = 14;
         const padTop = 12;
         const padBottom = 20;
@@ -1472,7 +1498,7 @@
         const grid = chartGridMarkup(bounds, width, height, padLeft, padRight, padTop, padBottom, kind);
         const avgMarkup = averageLineMarkup(numeric, bounds, width, height, padLeft, padRight, padTop, padBottom, color, kind);
         const gradId = `gradArea-${Math.abs(hashString(color + width)).toString(36)}`;
-        root.innerHTML = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true" style="color:var(--text-muted)">
+        root.innerHTML = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMinYMin meet" aria-hidden="true" style="color:var(--text-muted)">
           <defs>
             <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stop-color="${color}" stop-opacity="0.32" />
@@ -1482,7 +1508,7 @@
           ${grid}
           <path d="${area}" fill="url(#${gradId})" />
           ${avgMarkup}
-          <path d="${line}" fill="none" stroke="${color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="${line}" fill="none" stroke="${color}" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
           <g data-hover-layer opacity="0">
             <line data-hover-line x1="0" x2="0" y1="${padTop}" y2="${height - padBottom}" stroke="currentColor" stroke-opacity="0.46" stroke-width="1" />
             <circle data-hover-circle r="4" stroke-width="2" opacity="0" />
@@ -1511,9 +1537,8 @@
         }
         const kind = options.valueKind || "number";
         const bounds = chartDisplayBounds(allValues.map(Number), options);
-        const width = options.width || 600;
-        const height = options.height || 180;
-        const padLeft = options.padLeft || 48;
+        const { width, height } = chartDimensions(root, options);
+        const padLeft = options.padLeft || 56;
         const padRight = 14;
         const padTop = 12;
         const padBottom = 20;
@@ -1531,12 +1556,12 @@
             hoverSeries.push({ label: s.label || `#${seriesIndex + 1}`, color: s.color, kind, points: coords });
             const path = smoothPath(coords.map((point) => [point.x, point.y]));
             const avgMarkup = averageLineMarkup(s.points, bounds, width, height, padLeft, padRight, padTop, padBottom, s.color, kind, 0.30);
-            return `${avgMarkup}<path d="${path}" fill="none" stroke="${s.color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />`;
+            return `${avgMarkup}<path d="${path}" fill="none" stroke="${s.color}" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />`;
           })
           .join("");
         const grid = chartGridMarkup(bounds, width, height, padLeft, padRight, padTop, padBottom, kind);
         const hoverCircles = hoverSeries.map(() => `<circle data-hover-circle r="4" stroke-width="2" opacity="0" />`).join("");
-        root.innerHTML = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true" style="color:var(--text-muted)">
+        root.innerHTML = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMinYMin meet" aria-hidden="true" style="color:var(--text-muted)">
           ${grid}
           ${lines}
           <g data-hover-layer opacity="0">
