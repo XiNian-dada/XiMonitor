@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -32,13 +32,14 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{AppendHeaders, Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use chrono::{TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use futures::{SinkExt, StreamExt};
+use getrandom::fill as fill_random;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::net::TcpListener;
@@ -109,6 +110,7 @@ struct AppState {
     shared: SharedState,
     ws_admission: WsAdmissionController,
     readonly_auth: ReadonlyRouteAuth,
+    two_factor_sessions: TwoFactorSessions,
 }
 
 /// 只跟踪"对外是否可服务"所需的几个关键依赖状态。
@@ -129,11 +131,19 @@ struct ReadonlyRouteAuth {
     totp_secret: Option<Vec<u8>>,
 }
 
-/// 2FA 会话状态:用户通过 Basic Auth 后,等待 TOTP 验证。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TwoFactorSession {
-    username: String,
-    authenticated_at: i64, // Unix timestamp
+/// 服务端内存中的 2FA 会话票据。
+///
+/// Cookie 里只保存随机 token,真正的有效期与状态留在服务端内存里,避免前端
+/// 伪造 `ximonitor_auth=verified` 之类的静态 cookie 绕过二次验证。
+#[derive(Debug, Clone)]
+struct TwoFactorSessions {
+    inner: Arc<Mutex<TwoFactorSessionStore>>,
+}
+
+#[derive(Debug, Default)]
+struct TwoFactorSessionStore {
+    pending: HashMap<String, Instant>,
+    authenticated: HashMap<String, Instant>,
 }
 
 /// 2FA 验证请求。
@@ -313,6 +323,12 @@ const HELLO_TIMEOUT_SECS: u64 = 10;
 const MAX_OUTSTANDING_PINGS: usize = 32;
 /// 不安全传输警告的输出间隔(秒)。
 const INSECURE_TRANSPORT_WARN_INTERVAL_SECS: u64 = 900;
+/// Basic Auth 通过后等待输入 TOTP 的窗口。
+const TWO_FACTOR_PENDING_SECS: u64 = 300;
+/// 2FA 完成后的浏览器会话有效期。
+const TWO_FACTOR_AUTH_SECS: u64 = 24 * 60 * 60;
+const TWO_FACTOR_PENDING_COOKIE: &str = "ximonitor_2fa_pending";
+const TWO_FACTOR_AUTH_COOKIE: &str = "ximonitor_auth";
 /// 历史采样中允许的最大磁盘条目数,防止恶意 Agent 制造海量条目。
 const MAX_SANITIZED_DISKS: usize = 64;
 /// 单个磁盘字段(device/mount_point/fs_type)允许的最大字节数,防止 Agent 上报巨型字符串撑爆 UI 与历史库。
@@ -366,9 +382,10 @@ impl ReadonlyRouteAuth {
                 let auth = format!("Basic {encoded}");
 
                 let totp_secret = if config.enable_2fa {
-                    config.totp_secret.and_then(|s| {
-                        base32::decode(base32::Alphabet::Rfc4648 { padding: false }, &s)
-                    })
+                    config
+                        .totp_secret
+                        .as_deref()
+                        .and_then(decode_totp_secret)
                 } else {
                     None
                 };
@@ -397,6 +414,88 @@ impl ReadonlyRouteAuth {
             .and_then(|value| value.to_str().ok())
             == Some(expected_authorization)
     }
+}
+
+impl TwoFactorSessions {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(TwoFactorSessionStore::default())),
+        }
+    }
+
+    fn create_pending(&self) -> Result<String> {
+        let token = generate_session_token()?;
+        let expires_at = Instant::now() + Duration::from_secs(TWO_FACTOR_PENDING_SECS);
+        let mut store = lock_mutex(&self.inner);
+        prune_expired_sessions(&mut store, Instant::now());
+        store.pending.insert(token.clone(), expires_at);
+        Ok(token)
+    }
+
+    fn pending_exists(&self, token: &str) -> bool {
+        let mut store = lock_mutex(&self.inner);
+        prune_expired_sessions(&mut store, Instant::now());
+        store.pending.contains_key(token)
+    }
+
+    fn consume_pending(&self, token: &str) {
+        let mut store = lock_mutex(&self.inner);
+        store.pending.remove(token);
+    }
+
+    fn create_authenticated(&self) -> Result<String> {
+        let token = generate_session_token()?;
+        let expires_at = Instant::now() + Duration::from_secs(TWO_FACTOR_AUTH_SECS);
+        let mut store = lock_mutex(&self.inner);
+        prune_expired_sessions(&mut store, Instant::now());
+        store.authenticated.insert(token.clone(), expires_at);
+        Ok(token)
+    }
+
+    fn is_authenticated(&self, token: &str) -> bool {
+        let mut store = lock_mutex(&self.inner);
+        prune_expired_sessions(&mut store, Instant::now());
+        store.authenticated.contains_key(token)
+    }
+
+    fn remove_authenticated(&self, token: &str) {
+        let mut store = lock_mutex(&self.inner);
+        store.authenticated.remove(token);
+    }
+}
+
+fn prune_expired_sessions(store: &mut TwoFactorSessionStore, now: Instant) {
+    store.pending.retain(|_, expires_at| *expires_at > now);
+    store.authenticated.retain(|_, expires_at| *expires_at > now);
+}
+
+fn lock_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        warn!("mutex poisoned; recovering with stale state");
+        poisoned.into_inner()
+    })
+}
+
+fn generate_session_token() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    fill_random(&mut bytes).context("failed to gather secure random bytes")?;
+    Ok(hex_encode(&bytes))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn decode_totp_secret(value: &str) -> Option<Vec<u8>> {
+    let normalized = value.replace(' ', "").to_ascii_uppercase();
+    base32::decode(base32::Alphabet::Rfc4648 { padding: false }, &normalized)
+        .or_else(|| base32::decode(base32::Alphabet::Rfc4648 { padding: true }, &normalized))
 }
 
 impl ServerReadiness {
@@ -603,6 +702,7 @@ async fn run_server(config_path: &Path) -> Result<()> {
         shared,
         ws_admission: WsAdmissionController::new(&config.ws),
         readonly_auth: readonly_route_auth.clone(),
+        two_factor_sessions: TwoFactorSessions::new(),
     };
     let shared_for_shutdown = state.shared.clone();
     let snapshot_path = config.snapshot_path.clone();
@@ -843,20 +943,7 @@ async fn verify_2fa_api(
     headers: HeaderMap,
     Json(request): Json<Verify2FARequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Verify2FAError>)> {
-    // 检查是否有待验证的 2FA session cookie
-    let cookie_header = headers
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    let pending_session = cookie_header
-        .split(';')
-        .find_map(|cookie| {
-            let cookie = cookie.trim();
-            cookie.strip_prefix("ximonitor_2fa_pending=")
-        });
-
-    let Some(session_json) = pending_session else {
+    let Some(pending_token) = cookie_value(&headers, TWO_FACTOR_PENDING_COOKIE) else {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(Verify2FAError {
@@ -865,14 +952,14 @@ async fn verify_2fa_api(
         ));
     };
 
-    let _session: TwoFactorSession = serde_json::from_str(session_json).map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
+    if !state.two_factor_sessions.pending_exists(&pending_token) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
             Json(Verify2FAError {
-                error: "Invalid session".to_string(),
+                error: "2FA session expired".to_string(),
             }),
-        )
-    })?;
+        ));
+    }
 
     // 验证 TOTP 码
     if !verify_totp(&state, &request.code) {
@@ -884,13 +971,24 @@ async fn verify_2fa_api(
         ));
     }
 
-    // 验证成功:设置完整认证 cookie
+    let auth_token = state.two_factor_sessions.create_authenticated().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(Verify2FAError {
+                error: "Failed to create authenticated session".to_string(),
+            }),
+        )
+    })?;
+    state.two_factor_sessions.consume_pending(&pending_token);
+    let secure = secure_cookies(&state);
+
+    // 验证成功:设置只包含随机票据的完整认证 cookie。
     Ok((
         StatusCode::OK,
-        [
-            (header::SET_COOKIE, "ximonitor_auth=verified; Path=/; HttpOnly; Max-Age=86400"),
-            (header::SET_COOKIE, "ximonitor_2fa_pending=; Path=/; Max-Age=0"),
-        ],
+        AppendHeaders([
+            auth_cookie(TWO_FACTOR_AUTH_COOKIE, &auth_token, TWO_FACTOR_AUTH_SECS, secure),
+            expire_cookie(TWO_FACTOR_PENDING_COOKIE, secure),
+        ]),
     ))
 }
 
@@ -924,6 +1022,48 @@ fn verify_totp(state: &AppState, code: &str) -> bool {
     false
 }
 
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
+    headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|cookie_header| {
+            cookie_header.split(';').find_map(|cookie| {
+                let cookie = cookie.trim();
+                cookie
+                    .strip_prefix(prefix.as_str())
+                    .map(ToString::to_string)
+            })
+        })
+}
+
+fn auth_cookie(
+    name: &'static str,
+    value: &str,
+    max_age_secs: u64,
+    secure: bool,
+) -> (header::HeaderName, String) {
+    let secure_suffix = if secure { "; Secure" } else { "" };
+    (
+        header::SET_COOKIE,
+        format!(
+            "{name}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age_secs}{secure_suffix}"
+        ),
+    )
+}
+
+fn expire_cookie(name: &'static str, secure: bool) -> (header::HeaderName, String) {
+    let secure_suffix = if secure { "; Secure" } else { "" };
+    (
+        header::SET_COOKIE,
+        format!("{name}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{secure_suffix}"),
+    )
+}
+
+fn secure_cookies(state: &AppState) -> bool {
+    state.shared.config().public_base_url.starts_with("https://")
+}
+
 /// 健康检查接口,始终返回 200。
 async fn healthz() -> StatusCode {
     StatusCode::OK
@@ -940,10 +1080,21 @@ async fn readyz(State(state): State<AppState>) -> StatusCode {
 
 /// 登出并强制重新认证:返回 401 + WWW-Authenticate 头,触发浏览器清除缓存的
 /// Basic Auth 凭据。前端在检测到认证过期(24 小时)时会跳转到此路由。
-async fn logout_and_reauth() -> Response {
+async fn logout_and_reauth(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(token) = cookie_value(&headers, TWO_FACTOR_AUTH_COOKIE) {
+        state.two_factor_sessions.remove_authenticated(&token);
+    }
+    let secure = secure_cookies(&state);
     (
         StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Basic realm=\"XiMonitor\"")],
+        AppendHeaders([
+            expire_cookie(TWO_FACTOR_AUTH_COOKIE, secure),
+            expire_cookie(TWO_FACTOR_PENDING_COOKIE, secure),
+            (
+                header::WWW_AUTHENTICATE,
+                "Basic realm=\"XiMonitor\"".to_string(),
+            ),
+        ]),
         "Session expired. Please log in again.",
     )
         .into_response()
@@ -965,16 +1116,10 @@ async fn require_readonly_auth(
 
     // 如果启用了 2FA,先检查是否有完整认证 cookie
     if auth.enable_2fa {
-        let cookie_header = headers
-            .get(header::COOKIE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        let has_auth_cookie = cookie_header
-            .split(';')
-            .any(|cookie| cookie.trim() == "ximonitor_auth=verified");
-
-        if has_auth_cookie {
+        if cookie_value(&headers, TWO_FACTOR_AUTH_COOKIE)
+            .as_deref()
+            .is_some_and(|token| state.two_factor_sessions.is_authenticated(token))
+        {
             // 已完成 2FA 验证
             return next.run(request).await;
         }
@@ -982,20 +1127,28 @@ async fn require_readonly_auth(
         // 检查 Basic Auth
         if auth.is_authorized(&request) {
             // Basic Auth 通过,但需要 2FA 验证
-            // 设置 pending cookie 并重定向到 2FA 页面
-            let session = TwoFactorSession {
-                username: "admin".to_string(),
-                authenticated_at: Utc::now().timestamp(),
+            // 设置服务端随机 pending token 并重定向到 2FA 页面。
+            let pending_token = match state.two_factor_sessions.create_pending() {
+                Ok(token) => token,
+                Err(error) => {
+                    error!(error = ?error, "failed to create pending 2FA session");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
             };
-            let session_json = serde_json::to_string(&session).unwrap();
-            let pending_cookie = format!(
-                "ximonitor_2fa_pending={}; Path=/; HttpOnly; Max-Age=300",
-                session_json
-            );
+            let secure = secure_cookies(&state);
 
             return (
                 StatusCode::FOUND,
-                [(header::SET_COOKIE, pending_cookie.as_str()), (header::LOCATION, "/verify-2fa")],
+                AppendHeaders([
+                    auth_cookie(
+                        TWO_FACTOR_PENDING_COOKIE,
+                        &pending_token,
+                        TWO_FACTOR_PENDING_SECS,
+                        secure,
+                    ),
+                    expire_cookie(TWO_FACTOR_AUTH_COOKIE, secure),
+                    (header::LOCATION, "/verify-2fa".to_string()),
+                ]),
             )
                 .into_response();
         }
@@ -2171,6 +2324,7 @@ mod tests {
                 auth_block_secs: 600,
             }),
             readonly_auth: ReadonlyRouteAuth::from_config(None),
+            two_factor_sessions: TwoFactorSessions::new(),
         };
 
         let _app: Router = Router::new()
@@ -2206,6 +2360,19 @@ mod tests {
             .expect("request should build");
 
         assert!(auth.is_authorized(&request));
+    }
+
+    #[test]
+    fn two_factor_session_cookie_must_be_server_issued() {
+        let sessions = TwoFactorSessions::new();
+        assert!(!sessions.is_authenticated("verified"));
+
+        let token = sessions
+            .create_authenticated()
+            .expect("session token should be generated");
+        assert!(sessions.is_authenticated(&token));
+        sessions.remove_authenticated(&token);
+        assert!(!sessions.is_authenticated(&token));
     }
 
     #[test]
@@ -2331,6 +2498,7 @@ mod tests {
                     auth_block_secs: 600,
                 }),
                 readonly_auth: ReadonlyRouteAuth::from_config(None),
+                two_factor_sessions: TwoFactorSessions::new(),
             };
             let request = Request::builder()
                 .uri("/install/bootstrap")
