@@ -122,7 +122,7 @@ pub(crate) async fn verify_2fa_api(
     // 同样按"验证失败"处理 —— 否则攻击者捕获一次合法 verify 请求后,
     // 可以在同一 30 秒窗口内换一个 pending session 重发同一 code。
     let totp_step = totp_step.filter(|step| !state.two_factor_sessions.is_totp_step_used(*step));
-    if totp_step.is_none() {
+    let Some(totp_step) = totp_step else {
         let pending_invalidated = state
             .two_factor_sessions
             .record_failed_attempt(&pending_token);
@@ -144,8 +144,7 @@ pub(crate) async fn verify_2fa_api(
             (StatusCode::UNAUTHORIZED, body).into_response()
         };
         return Ok(response);
-    }
-    let totp_step = totp_step.expect("checked Some above");
+    };
     // 标记 step 已被使用,阻断未来 90 秒内同 step 的重放。
     state.two_factor_sessions.mark_totp_step_used(totp_step);
 
