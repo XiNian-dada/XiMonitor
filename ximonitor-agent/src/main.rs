@@ -514,23 +514,51 @@ fn host_is_local(host: Option<&str>) -> bool {
 
 /// 更新配置文件中的 token。
 ///
-/// 读取现有配置文件,替换 `token = "..."` 行,然后原子性写回。
+/// 在 `spawn_blocking` 中以"读 → 改 → 写 → fsync → rename → fsync 父目录"
+/// 的方式持久化新 token,等同于 server registry 的写入级别:
+///
+/// - 同步 IO 让我们能 fsync 临时文件与父目录,避免主机崩溃后 agent.toml
+///   被 rename 走却没有数据落盘,造成节点永久失联;
+/// - 临时文件名带 8 字节随机后缀,杜绝多 Agent 实例(或外部工具)
+///   意外共享 `agent.toml.tmp` 造成的互踩;
+/// - 写完后再 chmod 0o600,因为 token 是节点级别的长期凭证;
+/// - "token = " 行用严格前缀匹配,而非朴素 `starts_with("token")`,
+///   避免未来出现 `tokenization` / `token_secret` 等字段时被误替换。
 async fn update_token_in_config(config_path: &Path, new_token: &str) -> Result<()> {
-    // 读取现有配置
-    let content = fs::read_to_string(config_path)
+    let config_path = config_path.to_path_buf();
+    let new_token = new_token.to_string();
+    tokio::task::spawn_blocking(move || persist_token_sync(&config_path, &new_token))
         .await
-        .context("failed to read config file")?;
+        .context("token persistence task failed")?
+}
 
-    // 替换 token 行
-    let mut updated_lines = Vec::new();
+fn persist_token_sync(config_path: &Path, new_token: &str) -> Result<()> {
+    let content = std::fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let updated = replace_token_line(&content, new_token)?;
+
+    let tmp_path = temporary_config_path(config_path);
+    write_config_payload(&tmp_path, &updated)
+        .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, config_path)
+        .with_context(|| format!("failed to replace {}", config_path.display()))?;
+    sync_parent_dir(config_path);
+    harden_config_permissions(config_path)
+        .with_context(|| format!("failed to chmod {}", config_path.display()))?;
+    Ok(())
+}
+
+fn replace_token_line(content: &str, new_token: &str) -> Result<String> {
+    let mut updated_lines: Vec<String> = Vec::with_capacity(content.lines().count() + 1);
     let mut token_updated = false;
-
     for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("token") && trimmed.contains('=') {
-            // 替换 token 行,保留原有缩进
-            let indent = line.len() - line.trim_start().len();
-            updated_lines.push(format!("{}token = \"{}\"", " ".repeat(indent), new_token));
+        if !token_updated && is_token_assignment_line(line) {
+            let indent_len = line.len() - line.trim_start().len();
+            let indent = &line[..indent_len];
+            updated_lines.push(format!(
+                "{indent}token = \"{}\"",
+                escape_toml_string(new_token)
+            ));
             token_updated = true;
         } else {
             updated_lines.push(line.to_string());
@@ -541,16 +569,87 @@ async fn update_token_in_config(config_path: &Path, new_token: &str) -> Result<(
         anyhow::bail!("token field not found in config file");
     }
 
-    // 原子性写回:先写临时文件,再 rename
-    let temp_path = config_path.with_extension("tmp");
-    fs::write(&temp_path, updated_lines.join("\n") + "\n")
-        .await
-        .context("failed to write temp config file")?;
+    let mut result = updated_lines.join("\n");
+    result.push('\n');
+    Ok(result)
+}
 
-    fs::rename(&temp_path, config_path)
-        .await
-        .context("failed to rename temp config file")?;
+/// 判定某一行是不是 `token = "..."` 的赋值行。匹配规则:跳过注释行,
+/// 必须以 `token` 开头,紧随其后只能是空白 + `=`。这样可以排除
+/// `tokenization`、`token_secret` 等以 `token` 为前缀的字段。
+fn is_token_assignment_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        return false;
+    }
+    let Some(rest) = trimmed.strip_prefix("token") else {
+        return false;
+    };
+    let rest = rest.trim_start_matches([' ', '\t']);
+    rest.starts_with('=')
+}
 
+fn escape_toml_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn temporary_config_path(path: &Path) -> std::path::PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("agent.toml");
+    let mut suffix = [0u8; 8];
+    if fill_random(&mut suffix).is_err() {
+        // 极少见,但即便回退到固定后缀也好过崩溃。下面的 rename 仍是原子的。
+        return path.with_file_name(format!("{file_name}.tmp"));
+    }
+    let suffix_hex: String = suffix.iter().map(|byte| format!("{byte:02x}")).collect();
+    path.with_file_name(format!("{file_name}.tmp.{suffix_hex}"))
+}
+
+fn write_config_payload(path: &Path, payload: &str) -> Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    file.write_all(payload.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to fsync {}", path.display()))?;
+    Ok(())
+}
+
+fn sync_parent_dir(path: &Path) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if parent.as_os_str().is_empty() {
+        return;
+    }
+    // 打不开父目录(权限等)时静默退出 —— 数据本身已经 fsync,目录项丢失
+    // 最多让我们回退到旧 agent.toml,而旧 token 仍然有效。
+    let _ = std::fs::File::open(parent).and_then(|dir| dir.sync_all());
+}
+
+fn harden_config_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
     Ok(())
 }
 
@@ -559,7 +658,56 @@ mod tests {
     use std::collections::HashSet;
     use std::time::Duration;
 
-    use super::{reconnect_delay, uses_insecure_remote_transport};
+    use super::{
+        is_token_assignment_line, reconnect_delay, replace_token_line, uses_insecure_remote_transport,
+    };
+
+    #[test]
+    fn token_assignment_line_matches_exact_token_field_only() {
+        assert!(is_token_assignment_line("token = \"abc\""));
+        assert!(is_token_assignment_line("  token = \"abc\""));
+        assert!(is_token_assignment_line("\ttoken=\"abc\""));
+        assert!(is_token_assignment_line("token=\"abc\""));
+
+        // 不能误匹配以 token 为前缀的其它字段
+        assert!(!is_token_assignment_line("tokenization = true"));
+        assert!(!is_token_assignment_line("token_secret = \"xyz\""));
+        assert!(!is_token_assignment_line("# token = \"old\""));
+        assert!(!is_token_assignment_line("not_token = \"x\""));
+    }
+
+    #[test]
+    fn replace_token_line_preserves_comments_and_indent() {
+        let input = "[agent]\nnode_id = \"hk-01\"\n# token = \"old\"\n token = \"old\"\n";
+        let result = replace_token_line(input, "newvalue").expect("should replace");
+        // 注释行不动,真正的赋值行被替换,前导空格保留。
+        assert!(result.contains("# token = \"old\""));
+        assert!(result.contains(" token = \"newvalue\""));
+        // 真正的赋值行不应该还保留旧 token。
+        assert_eq!(result.matches("token = \"old\"").count(), 1, "only the comment line keeps the old value");
+    }
+
+    #[test]
+    fn replace_token_line_only_replaces_first_occurrence() {
+        // 一份配置正常只会有一处 token 赋值;但即便手工写错也只替换第一处,
+        // 避免破坏配置中其它意外的 token 行(虽然概率很低)。
+        let input = "token = \"a\"\ntoken = \"b\"\n";
+        let result = replace_token_line(input, "c").expect("should replace first");
+        assert_eq!(result, "token = \"c\"\ntoken = \"b\"\n");
+    }
+
+    #[test]
+    fn replace_token_line_escapes_special_chars() {
+        let result =
+            replace_token_line("token = \"x\"\n", "with\"quote\\and-backslash").expect("ok");
+        assert!(result.contains("\"with\\\"quote\\\\and-backslash\""));
+    }
+
+    #[test]
+    fn replace_token_line_fails_when_no_token_field() {
+        let result = replace_token_line("[agent]\nnode_id = \"x\"\n", "new");
+        assert!(result.is_err());
+    }
 
     #[test]
     fn warns_for_remote_ws_transport() {
