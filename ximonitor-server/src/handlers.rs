@@ -402,6 +402,10 @@ pub(crate) async fn bootstrap(State(state): State<AppState>) -> impl IntoRespons
 /// 设置页数据接口:只返回运行状态与安全元信息,不泄露任何凭证本体。
 pub(crate) async fn settings(State(state): State<AppState>) -> impl IntoResponse {
     let config = state.shared.config();
+    let runtime_auth = {
+        let auth = state.readonly_auth.read().await;
+        auth.config.clone()
+    };
     let statuses = state.shared.list_statuses().await;
     let status_by_id = statuses
         .into_iter()
@@ -429,7 +433,7 @@ pub(crate) async fn settings(State(state): State<AppState>) -> impl IntoResponse
             }
         })
         .collect();
-    let auth = config.readonly_auth.as_ref();
+    let auth = runtime_auth.as_ref();
     Json(SettingsResponse {
         service: "ximonitor-server",
         server_version: server_build_version(),
@@ -726,16 +730,31 @@ pub(crate) async fn enable_two_factor(
         *auth = ReadonlyRouteAuth::from_config(Some(next_auth));
     }
     state.two_factor_sessions.clear_authenticated();
+    let auth_token = match state.two_factor_sessions.create_authenticated() {
+        Ok(token) => token,
+        Err(error) => {
+            error!(error = ?error, "failed to create 2FA session after enabling 2FA");
+            return settings_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to create authenticated session",
+            );
+        }
+    };
     let secure = secure_cookies(state.shared.config());
     (
         StatusCode::OK,
         AppendHeaders([
-            expire_cookie(TWO_FACTOR_AUTH_COOKIE, secure),
+            auth_cookie(
+                TWO_FACTOR_AUTH_COOKIE,
+                &auth_token,
+                TWO_FACTOR_AUTH_SECS,
+                secure,
+            ),
             expire_cookie(TWO_FACTOR_PENDING_COOKIE, secure),
         ]),
         Json(SettingsActionResponse {
             ok: true,
-            message: "2FA enabled; please sign in again".to_string(),
+            message: "2FA enabled".to_string(),
         }),
     )
         .into_response()
@@ -1022,7 +1041,8 @@ fn generate_totp_secret() -> anyhow::Result<String> {
 fn otpauth_uri(username: &str, secret: &str) -> String {
     let issuer = "XiMonitor";
     format!(
-        "otpauth://totp/{}?secret={}&issuer={}&algorithm=SHA1&digits=6&period=30",
+        "otpauth://totp/{}:{}?secret={}&issuer={}",
+        percent_encode_component(issuer),
         percent_encode_component(username),
         percent_encode_component(secret),
         percent_encode_component(issuer)
@@ -1345,7 +1365,7 @@ totp_secret = "JBSWY3DPEHPK3PXP"
 
         assert_eq!(
             uri,
-            "otpauth://totp/viewer%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=XiMonitor&algorithm=SHA1&digits=6&period=30"
+            "otpauth://totp/XiMonitor:viewer%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=XiMonitor"
         );
     }
 }

@@ -619,15 +619,16 @@
       }
       .totp-setup-grid {
         display: grid;
-        grid-template-columns: 168px minmax(0, 1fr);
-        gap: 14px;
+        grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+        gap: 18px;
         align-items: start;
       }
       .totp-qr-wrap {
         border-radius: 16px;
         background: #fff;
-        padding: 10px;
+        padding: 14px;
         box-shadow: var(--shadow-soft);
+        width: min(100%, 320px);
       }
       .totp-qr { width: 100%; height: auto; display: block; }
       .secret-box {
@@ -1746,8 +1747,8 @@
           });
           message.className = "settings-message ok";
           message.textContent = t("settings.security.enabled_saved");
-          try { window.localStorage.removeItem("ximonitor.auth.timestamp"); } catch (_e) {}
-          window.setTimeout(() => { window.location.href = "/logout-and-reauth"; }, 900);
+          pendingTwoFactorSetup = null;
+          window.setTimeout(() => loadSettings(), 600);
         } catch (error) {
           message.className = "settings-message error";
           message.textContent = t("settings.security.action_failed", { error: error.message });
@@ -1767,8 +1768,7 @@
           });
           message.className = "settings-message ok";
           message.textContent = t("settings.security.disabled_saved");
-          try { window.localStorage.removeItem("ximonitor.auth.timestamp"); } catch (_e) {}
-          window.setTimeout(() => { window.location.href = "/logout-and-reauth"; }, 900);
+          window.setTimeout(() => loadSettings(), 600);
         } catch (error) {
           message.className = "settings-message error";
           message.textContent = t("settings.security.action_failed", { error: error.message });
