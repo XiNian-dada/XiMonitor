@@ -314,7 +314,8 @@ impl RawServerConfigFile {
         let totp_secret = self
             .auth
             .totp_secret
-            .map(|value| normalize_totp_secret(&value));
+            .map(|value| normalize_totp_secret(&value))
+            .filter(|value| !value.is_empty());
         if enable_2fa && self.auth.username.is_none() {
             return Err(ConfigError::new(
                 "auth.username and auth.password are required when auth.enable_2fa = true",
@@ -325,7 +326,7 @@ impl RawServerConfigFile {
                 "auth.totp_secret is required when auth.enable_2fa = true",
             ));
         }
-        if let Some(secret) = totp_secret.as_deref() {
+        if enable_2fa && let Some(secret) = totp_secret.as_deref() {
             validate_totp_secret("auth.totp_secret", secret)?;
         }
         // 没有 HTTPS,2FA 是个剧场:Cookie 与 TOTP code 都会在明文链路上传输,
@@ -901,6 +902,50 @@ mod tests {
 
         let auth = config.readonly_auth.expect("auth should be configured");
         assert_eq!(auth.totp_secret.as_deref(), Some("JBSWY3DPEHPK3PXP"));
+    }
+
+    #[test]
+    fn ignores_empty_totp_secret_when_2fa_is_disabled() {
+        let config = parse_server_config(
+            r#"
+            [server]
+            listen = "127.0.0.1:8080"
+            public_base_url = "https://monitor.example.com"
+
+            [auth]
+            username = "viewer"
+            password = "secret123"
+            enable_2fa = false
+            totp_secret = ""
+            "#,
+        )
+        .expect("disabled 2fa should ignore empty totp secret");
+
+        let auth = config.readonly_auth.expect("auth should be configured");
+        assert!(!auth.enable_2fa);
+        assert_eq!(auth.totp_secret, None);
+    }
+
+    #[test]
+    fn ignores_invalid_totp_secret_when_2fa_is_disabled() {
+        let config = parse_server_config(
+            r#"
+            [server]
+            listen = "127.0.0.1:8080"
+            public_base_url = "https://monitor.example.com"
+
+            [auth]
+            username = "viewer"
+            password = "secret123"
+            enable_2fa = false
+            totp_secret = "not-a-base32-secret"
+            "#,
+        )
+        .expect("disabled 2fa should ignore invalid totp secret");
+
+        let auth = config.readonly_auth.expect("auth should be configured");
+        assert!(!auth.enable_2fa);
+        assert_eq!(auth.totp_secret.as_deref(), Some("NOTABASE32SECRET"));
     }
 
     #[test]
