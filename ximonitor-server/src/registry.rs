@@ -24,6 +24,8 @@ use tokio::sync::RwLock;
 use url::Url;
 use ximonitor_proto::NodeIdentity;
 
+use crate::fs_security::{create_private_dir_all, ensure_directory_mode};
+
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -528,8 +530,7 @@ fn save_registry_file_sync(path: &Path, file: &RegistryFile) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+        create_private_dir_all(parent)?;
     }
 
     let payload =
@@ -627,8 +628,7 @@ fn acquire_registry_lock(path: &Path) -> Result<RegistryFileLock> {
     if let Some(parent) = lock_path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+        create_private_dir_all(parent)?;
     }
 
     let mut options = OpenOptions::new();
@@ -675,6 +675,11 @@ fn unlock_file(file: &File) {
 }
 
 fn harden_registry_permissions(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        ensure_directory_mode(parent, 0o700)?;
+    }
     #[cfg(unix)]
     {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
@@ -1214,7 +1219,8 @@ mod tests {
             let temp_dir =
                 std::env::temp_dir().join(format!("ximonitor-registry-mode-test-{unique}"));
             std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
-            let path = temp_dir.join("server.json");
+            let config_dir = temp_dir.join("config");
+            let path = config_dir.join("server.json");
 
             issue_node(
                 &path,
@@ -1228,6 +1234,13 @@ mod tests {
             .await
             .expect("node should be issued");
 
+            let dir_mode = std::fs::metadata(&config_dir)
+                .expect("config dir should exist")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o700);
+
             let mode = std::fs::metadata(&path)
                 .expect("metadata should exist")
                 .permissions()
@@ -1236,6 +1249,7 @@ mod tests {
             assert_eq!(mode, 0o600);
 
             let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_dir(&config_dir);
             let _ = std::fs::remove_dir(&temp_dir);
         });
     }

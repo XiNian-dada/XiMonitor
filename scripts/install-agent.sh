@@ -443,6 +443,7 @@ TimeoutStopSec=15s
 User=$SERVICE_USER
 Group=$SERVICE_GROUP
 WorkingDirectory=$STATE_DIR
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true

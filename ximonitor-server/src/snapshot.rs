@@ -14,6 +14,7 @@ use tokio::time::{MissedTickBehavior, interval};
 use tracing::warn;
 use ximonitor_proto::NodeStatus;
 
+use crate::fs_security::{create_private_dir_all_async, ensure_directory_mode};
 use crate::state::SharedState;
 
 #[cfg(unix)]
@@ -51,9 +52,7 @@ pub(crate) async fn persist_snapshot(path: &Path, statuses: &[NodeStatus]) -> Re
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("failed to create snapshot directory {}", parent.display()))?;
+        create_private_dir_all_async(parent).await?;
     }
 
     let payload =
@@ -122,6 +121,11 @@ async fn sync_parent_dir(path: &Path) {
 
 /// 强制把目标文件的权限调整为 0600(仅文件属主可读写)。
 fn harden_snapshot_permissions(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        ensure_directory_mode(parent, 0o700)?;
+    }
     #[cfg(unix)]
     {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
@@ -161,7 +165,8 @@ mod tests {
             let temp_dir =
                 std::env::temp_dir().join(format!("ximonitor-snapshot-mode-test-{unique}"));
             std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
-            let snapshot_path = temp_dir.join("snapshot.json");
+            let data_dir = temp_dir.join("data");
+            let snapshot_path = data_dir.join("snapshot.json");
             let statuses = vec![NodeStatus {
                 identity: NodeIdentity {
                     node_id: "hk-01".to_string(),
@@ -186,6 +191,13 @@ mod tests {
                 .await
                 .expect("snapshot should persist");
 
+            let dir_mode = std::fs::metadata(&data_dir)
+                .expect("snapshot dir metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o700);
+
             let mode = std::fs::metadata(&snapshot_path)
                 .expect("snapshot metadata")
                 .permissions()
@@ -194,6 +206,7 @@ mod tests {
             assert_eq!(mode, 0o600);
 
             let _ = std::fs::remove_file(&snapshot_path);
+            let _ = std::fs::remove_dir(&data_dir);
             let _ = std::fs::remove_dir(&temp_dir);
         });
     }

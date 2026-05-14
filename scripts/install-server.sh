@@ -572,6 +572,7 @@ TimeoutStopSec=15s
 WorkingDirectory=$INSTALL_ROOT
 User=root
 Group=root
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true

@@ -23,6 +23,8 @@ use ximonitor_proto::{
     percentage,
 };
 
+use crate::fs_security::{create_private_dir_all, ensure_directory_mode};
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -238,8 +240,7 @@ fn initialize_database(db_path: &PathBuf) -> Result<Connection> {
     if let Some(parent) = db_path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create history directory {}", parent.display()))?;
+        create_private_dir_all(parent)?;
     }
 
     let connection = open_database_connection(db_path, true)?;
@@ -385,6 +386,11 @@ fn open_database_connection(db_path: &PathBuf, enable_wal: bool) -> Result<Conne
 
 /// 收紧主库文件以及 WAL / SHM 辅助文件的权限。
 fn harden_database_artifacts(db_path: &PathBuf) -> Result<()> {
+    if let Some(parent) = db_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        ensure_directory_mode(parent, 0o700)?;
+    }
     harden_path_permissions(db_path)?;
     for suffix in ["-wal", "-shm"] {
         let mut artifact = OsString::from(db_path.as_os_str());
@@ -589,7 +595,8 @@ mod tests {
                 .as_nanos();
             let temp_dir = std::env::temp_dir().join(format!("ximonitor-history-mode-{unique}"));
             std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
-            let db_path = temp_dir.join("history.sqlite3");
+            let data_dir = temp_dir.join("data");
+            let db_path = data_dir.join("history.sqlite3");
 
             let connection = initialize_database(&db_path).expect("database should initialize");
             write_history_point(
@@ -609,6 +616,7 @@ mod tests {
             )
             .expect("history point should persist");
 
+            assert_mode_700(&data_dir);
             assert_mode_600(&db_path);
             for suffix in ["-wal", "-shm"] {
                 let mut artifact = std::ffi::OsString::from(db_path.as_os_str());
@@ -621,8 +629,21 @@ mod tests {
             }
 
             let _ = std::fs::remove_file(&db_path);
+            let _ = std::fs::remove_dir(&data_dir);
             let _ = std::fs::remove_dir(&temp_dir);
         });
+    }
+
+    #[cfg(unix)]
+    fn assert_mode_700(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = std::fs::metadata(path)
+            .expect("artifact metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     #[cfg(unix)]

@@ -14,6 +14,7 @@
 mod admission;
 mod auth;
 mod cli;
+mod fs_security;
 mod handlers;
 mod history;
 #[cfg(test)]
@@ -52,6 +53,7 @@ use ximonitor_proto::{ServerConfig, parse_server_config};
 use crate::admission::{InstallAdmissionConfig, InstallAdmissionController, WsAdmissionController};
 use crate::auth::{ReadonlyRouteAuth, TwoFactorSessions};
 use crate::cli::{Cli, Command, install_agent_command, issue_node_command, upgrade_agent_command};
+use crate::fs_security::log_if_directory_is_not_private;
 use crate::handlers::{
     bootstrap, change_readonly_password, disable_two_factor, enable_two_factor, healthz, index,
     install_agent_script, install_bootstrap, logout_and_reauth, node_detail, node_history,
@@ -341,21 +343,33 @@ async fn load_server_config(path: &Path) -> Result<ServerConfig> {
 
     if let Some(parent) = config.snapshot_path.parent()
         && !parent.as_os_str().is_empty()
-        && !parent.exists()
     {
-        warn!(
-            snapshot_dir = %parent.display(),
-            "snapshot directory does not exist yet; it will be created later",
-        );
+        if !parent.exists() {
+            warn!(
+                snapshot_dir = %parent.display(),
+                "snapshot directory does not exist yet; it will be created later",
+            );
+        } else {
+            log_if_directory_is_not_private(parent, "snapshot_path.parent");
+        }
     }
     if let Some(parent) = config.history_db_path.parent()
         && !parent.as_os_str().is_empty()
-        && !parent.exists()
     {
-        warn!(
-            history_dir = %parent.display(),
-            "history directory does not exist yet; it will be created later",
-        );
+        if !parent.exists() {
+            warn!(
+                history_dir = %parent.display(),
+                "history directory does not exist yet; it will be created later",
+            );
+        } else {
+            log_if_directory_is_not_private(parent, "history_db_path.parent");
+        }
+    }
+    if let Some(parent) = config.node_registry_path.parent()
+        && !parent.as_os_str().is_empty()
+        && parent.exists()
+    {
+        log_if_directory_is_not_private(parent, "node_registry_path.parent");
     }
 
     Ok(config)
