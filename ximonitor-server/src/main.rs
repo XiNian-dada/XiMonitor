@@ -16,6 +16,7 @@ mod auth;
 mod cli;
 mod handlers;
 mod history;
+mod qr;
 mod registry;
 mod sanitize;
 mod snapshot;
