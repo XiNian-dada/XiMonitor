@@ -205,7 +205,7 @@ curl -fsSL https://github.com/XiNian-dada/XiMonitor/releases/latest/download/ins
 - 监听在 `127.0.0.1:<随机端口>`
 - 要求你输入对外访问的域名或 IP，并据此生成 `public_base_url`
 - 生成一组只读面板 Basic Auth 账号
-- 如果是升级，会自动读取现有配置作为默认值，并把缺失字段补回当前模板
+- 如果是升级，只替换二进制与 systemd unit，保留现有 `server.toml`、面板账号密码、节点 token 和注册表内容不变
 
 安装完成后会直接打印：
 

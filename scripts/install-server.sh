@@ -486,12 +486,6 @@ fi
 
 if [ "$MODE" = "upgrade" ]; then
   [ -f "$CONFIG_PATH" ] || fail "existing server config not found at $CONFIG_PATH"
-  LISTEN_HOST="$LISTEN_HOST_DEFAULT_VALUE"
-  LISTEN_PORT="$LISTEN_PORT_DEFAULT_VALUE"
-  PUBLIC_HOST="$PUBLIC_HOST_DEFAULT_VALUE"
-  PUBLIC_SCHEME="$PUBLIC_SCHEME_DEFAULT_VALUE"
-  READONLY_USERNAME="$READONLY_USERNAME_DEFAULT_VALUE"
-  READONLY_PASSWORD="$READONLY_PASSWORD_DEFAULT_VALUE"
 else
   LISTEN_HOST="$(prompt_required "Listen host" "$LISTEN_HOST_DEFAULT_VALUE")"
   LISTEN_PORT="$(prompt_required "Listen port" "$LISTEN_PORT_DEFAULT_VALUE")"
@@ -598,9 +592,13 @@ fi
 printf '%s\n' "Binary: $BIN_PATH" >/dev/tty
 printf '%s\n' "Config: $CONFIG_PATH" >/dev/tty
 printf '%s\n' "Registry: $REGISTRY_PATH" >/dev/tty
-printf '%s\n' "Readonly username: $READONLY_USERNAME" >/dev/tty
-printf '%s\n' "Readonly password: $READONLY_PASSWORD" >/dev/tty
-printf '%s\n' "Public base URL: ${PUBLIC_SCHEME}://${PUBLIC_HOST}" >/dev/tty
+if [ "$MODE" = "upgrade" ]; then
+  printf '%s\n' "Config preserved: existing server.toml and readonly credentials were kept." >/dev/tty
+else
+  printf '%s\n' "Readonly username: $READONLY_USERNAME" >/dev/tty
+  printf '%s\n' "Readonly password: $READONLY_PASSWORD" >/dev/tty
+  printf '%s\n' "Public base URL: ${PUBLIC_SCHEME}://${PUBLIC_HOST}" >/dev/tty
+fi
 printf '\n' >/dev/tty
 printf '%s\n' "Next step: enroll an agent from this server with:" >/dev/tty
 printf '%s\n' "  $BIN_PATH --config $CONFIG_PATH install-agent --node-id hk-01 --node-label \"Hong Kong 01\"" >/dev/tty
