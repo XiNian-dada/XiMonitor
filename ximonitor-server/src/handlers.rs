@@ -533,7 +533,7 @@ pub(crate) async fn start_server_update(
     let Some(current_auth) = current_auth else {
         return settings_json_error(StatusCode::CONFLICT, "readonly auth is not enabled");
     };
-    if let Err(response) = verify_settings_confirmation_for_sensitive_action(
+    if let Some(response) = settings_confirmation_error_for_sensitive_action(
         &state,
         &current_auth,
         request.current_password.as_deref(),
@@ -572,54 +572,54 @@ pub(crate) async fn start_server_update(
     }
 }
 
-fn verify_settings_confirmation_for_sensitive_action(
+fn settings_confirmation_error_for_sensitive_action(
     state: &AppState,
     auth: &ReadonlyAuthConfig,
     current_password: Option<&str>,
     code: Option<&str>,
-) -> Result<(), Response> {
+) -> Option<Response> {
     if !auth.enable_2fa {
         let Some(current_password) = current_password.filter(|password| !password.is_empty())
         else {
-            return Err(settings_json_error(
+            return Some(settings_json_error(
                 StatusCode::UNAUTHORIZED,
                 "current password is required",
             ));
         };
         if constant_time_compare_bytes(auth.password.as_bytes(), current_password.as_bytes()) {
-            return Ok(());
+            return None;
         }
-        return Err(settings_json_error(
+        return Some(settings_json_error(
             StatusCode::UNAUTHORIZED,
             "current password is incorrect",
         ));
     }
     let Some(secret) = auth.totp_secret.as_deref().and_then(decode_totp_secret) else {
-        return Err(settings_json_error(
+        return Some(settings_json_error(
             StatusCode::CONFLICT,
             "2FA secret is not configured",
         ));
     };
     let Some(code) = code.map(str::trim).filter(|code| !code.is_empty()) else {
-        return Err(settings_json_error(
+        return Some(settings_json_error(
             StatusCode::UNAUTHORIZED,
             "verification code is required",
         ));
     };
     let Some(step) = verify_totp_step(Some(&secret), code) else {
-        return Err(settings_json_error(
+        return Some(settings_json_error(
             StatusCode::UNAUTHORIZED,
             "invalid verification code",
         ));
     };
     if state.two_factor_sessions.is_totp_step_used(step) {
-        return Err(settings_json_error(
+        return Some(settings_json_error(
             StatusCode::UNAUTHORIZED,
             "verification code already used",
         ));
     }
     state.two_factor_sessions.mark_totp_step_used(step);
-    Ok(())
+    None
 }
 
 /// 开始网页端 2FA 绑定:生成一个新 TOTP secret 和本地 SVG 二维码。
