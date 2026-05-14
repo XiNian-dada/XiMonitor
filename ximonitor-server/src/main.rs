@@ -36,6 +36,7 @@ use axum::routing::{get, post};
 use clap::Parser;
 use tokio::fs;
 use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 use tokio::time::{MissedTickBehavior, interval};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
@@ -68,7 +69,7 @@ pub(crate) struct AppState {
     pub(crate) registry: NodeRegistry,
     pub(crate) shared: SharedState,
     pub(crate) ws_admission: WsAdmissionController,
-    pub(crate) readonly_auth: ReadonlyRouteAuth,
+    pub(crate) readonly_auth: Arc<RwLock<ReadonlyRouteAuth>>,
     pub(crate) two_factor_sessions: TwoFactorSessions,
     pub(crate) config_path: Arc<PathBuf>,
 }
@@ -196,7 +197,7 @@ async fn run_server(config_path: &Path) -> Result<()> {
         registry,
         shared,
         ws_admission: WsAdmissionController::new(&config.ws),
-        readonly_auth: readonly_route_auth.clone(),
+        readonly_auth: Arc::new(RwLock::new(readonly_route_auth.clone())),
         two_factor_sessions: TwoFactorSessions::new(),
         config_path: Arc::new(config_path.to_path_buf()),
     };
@@ -580,7 +581,7 @@ mod tests {
                 auth_fail_max_attempts: 6,
                 auth_block_secs: 600,
             }),
-            readonly_auth: ReadonlyRouteAuth::from_config(None),
+            readonly_auth: Arc::new(RwLock::new(ReadonlyRouteAuth::from_config(None))),
             two_factor_sessions: TwoFactorSessions::new(),
             config_path: Arc::new(PathBuf::from("config/server.toml")),
         };
@@ -808,7 +809,7 @@ mod tests {
                     auth_fail_max_attempts: 6,
                     auth_block_secs: 600,
                 }),
-                readonly_auth: ReadonlyRouteAuth::from_config(None),
+                readonly_auth: Arc::new(RwLock::new(ReadonlyRouteAuth::from_config(None))),
                 two_factor_sessions: TwoFactorSessions::new(),
                 config_path: Arc::new(temp_dir.join("server.toml")),
             };

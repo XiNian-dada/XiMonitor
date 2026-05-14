@@ -166,7 +166,11 @@ pub(crate) async fn verify_2fa_api(
     }
 
     // 验证 TOTP 码并解析出匹配到的 time_step
-    let totp_step = verify_totp_step(state.readonly_auth.totp_secret.as_deref(), &request.code);
+    let totp_secret = {
+        let auth = state.readonly_auth.read().await;
+        auth.totp_secret.clone()
+    };
+    let totp_step = verify_totp_step(totp_secret.as_deref(), &request.code);
     // Replay 检查:即便 code 数学上正确,如果它对应的 step 已经被消费过,
     // 同样按"验证失败"处理 —— 否则攻击者捕获一次合法 verify 请求后,
     // 可以在同一 30 秒窗口内换一个 pending session 重发同一 code。
@@ -274,10 +278,11 @@ pub(crate) async fn require_readonly_auth(
     request: Request,
     next: Next,
 ) -> Response {
-    let auth = &state.readonly_auth;
+    let auth = state.readonly_auth.read().await;
 
     // 如果未启用认证,直接放行
     if auth.expected_authorization.is_none() {
+        drop(auth);
         return next.run(request).await;
     }
 
@@ -288,11 +293,13 @@ pub(crate) async fn require_readonly_auth(
             .is_some_and(|token| state.two_factor_sessions.is_authenticated(token))
         {
             // 已完成 2FA 验证
+            drop(auth);
             return next.run(request).await;
         }
 
         // 检查 Basic Auth
         if auth.is_authorized(&request) {
+            drop(auth);
             // Basic Auth 通过,但需要 2FA 验证
             // 设置服务端随机 pending token 并重定向到 2FA 页面。
             let pending_token = match state.two_factor_sessions.create_pending() {
@@ -322,6 +329,7 @@ pub(crate) async fn require_readonly_auth(
     } else {
         // 未启用 2FA,只检查 Basic Auth
         if auth.is_authorized(&request) {
+            drop(auth);
             return next.run(request).await;
         }
     }
