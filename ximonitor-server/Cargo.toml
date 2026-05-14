@@ -9,7 +9,6 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
-axum-extra = { version = "0.9", features = ["cookie", "cookie-private"] }
 base32 = "0.5"
 base64.workspace = true
 chrono.workspace = true
