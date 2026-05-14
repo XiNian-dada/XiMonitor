@@ -16,6 +16,8 @@ mod auth;
 mod cli;
 mod handlers;
 mod history;
+#[cfg(test)]
+mod load_test;
 mod qr;
 mod registry;
 mod sanitize;

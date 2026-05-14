@@ -2264,6 +2264,7 @@ dependencies = [
  "serde_json",
  "time",
  "tokio",
+ "tokio-tungstenite 0.28.0",
  "totp-lite",
  "tower-http",
  "tracing",

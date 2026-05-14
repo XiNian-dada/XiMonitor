@@ -28,3 +28,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 ximonitor-proto = { path = "../ximonitor-proto" }
+
+[dev-dependencies]
+tokio-tungstenite.workspace = true
