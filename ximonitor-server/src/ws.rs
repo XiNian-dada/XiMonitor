@@ -19,8 +19,9 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{ConnectInfo, State, WebSocketUpgrade};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::{SinkExt, StreamExt};
+use tokio::sync::mpsc;
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{error, info, warn};
 use ximonitor_proto::{
@@ -34,12 +35,13 @@ use crate::sanitize::{
     METRIC_ANOMALY_SESSION_LIMIT, METRIC_ANOMALY_WINDOW_SECS, sanitize_snapshot,
     should_disconnect_for_metric_anomalies, update_metric_anomaly_window,
 };
+use crate::state::{SessionCommand, SessionRefreshReply};
 
 /// 等待 Hello 报文的超时时间(秒)。
 const HELLO_TIMEOUT_SECS: u64 = 10;
 /// 同时未应答的 Ping 上限,超过后会丢弃最老的一条,避免内存占用无限增长。
 const MAX_OUTSTANDING_PINGS: usize = 32;
-/// Token 距离过期不足该天数时,服务端在已认证会话内主动轮换并下发新 token。
+/// Token 距离过期不足该天数时,服务端在已认证会话内主动续期并下发新 token。
 const AGENT_TOKEN_REFRESH_BEFORE_EXPIRY_DAYS: i64 = 7;
 
 /// WebSocket 处理流程中的错误来源区分:
@@ -179,6 +181,14 @@ async fn handle_socket(
         send_wire_message(&mut socket, &notice).await?;
 
         let (mut sender, mut receiver) = socket.split();
+        let (session_control_tx, mut session_control_rx) = mpsc::unbounded_channel();
+        if !shared
+            .attach_session_control(&node_id, session_id, session_control_tx)
+            .await
+        {
+            warn!(node_id = %node_id, session_id, "failed to attach control channel for superseded session");
+            return Ok(());
+        }
         let ping_every = Duration::from_secs(shared.config().ping_interval_secs);
         let ping_expiry = Duration::from_secs(shared.config().ping_interval_secs.saturating_mul(3));
         let mut ping_ticker = interval(ping_every);
@@ -316,6 +326,35 @@ async fn handle_socket(
                         },
                     }
                 }
+                command = session_control_rx.recv() => {
+                    let Some(command) = command else {
+                        break Ok(());
+                    };
+                    match command {
+                        SessionCommand::RefreshToken { response } => {
+                            match refresh_session_token(
+                                &mut sender,
+                                &state.registry,
+                                &node_id,
+                                &mut session_token,
+                                "manual",
+                            )
+                            .await
+                            {
+                                Ok(expires_at) => {
+                                    let _ = response.send(Ok(SessionRefreshReply {
+                                        token_expires_at: expires_at,
+                                    }));
+                                }
+                                Err(error) => {
+                                    let message = error.to_string();
+                                    let _ = response.send(Err(message));
+                                    break Err(ProtocolError::Server(error));
+                                }
+                            }
+                        }
+                    }
+                }
                 _ = ping_ticker.tick() => {
                     if !shared.is_current_session(&node_id, session_id).await {
                         warn!(node_id = %node_id, session_id, "closing superseded websocket session");
@@ -325,23 +364,15 @@ async fn handle_socket(
                         warn!(node_id = %node_id, "closing websocket session after registry token change");
                         break Ok(());
                     }
-                    if let Some(refresh) = maybe_refresh_agent_token(
-                        &state.registry,
-                        &node_id,
-                    )
-                    .await?
-                    {
-                        // 关键顺序:registry 已经在 refresh 内写盘,但本地
-                        // session_token 只有在帧成功推到 TCP 缓冲区后才替换 ——
-                        // 否则一旦 send 失败,我们就会处在"server 内存里是
-                        // 新 token、agent 持有旧 token"的不一致状态。
-                        // send 失败时 bubble 出去触发 session 结束,is_token_current
-                        // 在下一轮会发现 registry 已经轮换,让 agent 重连。
-                        sender
-                            .send(Message::Text(refresh.payload.into()))
-                            .await
-                            .map_err(|error| anyhow!("failed to send token refresh response: {error}"))?;
-                        session_token = refresh.new_token;
+                    if should_refresh_agent_token(&state.registry, &node_id).await? {
+                        refresh_session_token(
+                            &mut sender,
+                            &state.registry,
+                            &node_id,
+                            &mut session_token,
+                            "pre-expiry",
+                        )
+                        .await?;
                     }
 
                     prune_outstanding_pings(&mut outstanding_pings, ping_expiry);
@@ -365,37 +396,35 @@ async fn handle_socket(
     session_result
 }
 
-/// 临近过期时颁发新 token,把"序列化好的 JSON 帧 + 对应的新 token"打包返回。
-///
-/// 调用方负责把 `payload` 推送出去后再把自己的 `session_token` 替换成
-/// `new_token`,以保证两端视图同步:registry 内是新 token,agent 还没收到 → 暂时
-/// 不一致,但 server 内存里也仍持有旧 token,`is_token_current` 会在下一轮发现
-/// 不一致并主动关闭 session,从而触发 agent 重连。如果交换顺序,反而会让
-/// server 误以为已经协商完成,继续在新 token 下与一个仍持旧 token 的 agent
-/// 通信,最终走到 "wrong token" 的硬拒绝。
-struct PreparedTokenRefresh {
-    payload: String,
-    new_token: String,
-}
-
-async fn maybe_refresh_agent_token(
-    registry: &NodeRegistry,
-    node_id: &str,
-) -> Result<Option<PreparedTokenRefresh>> {
+async fn should_refresh_agent_token(registry: &NodeRegistry, node_id: &str) -> Result<bool> {
     let refresh_after = Utc::now() + ChronoDuration::days(AGENT_TOKEN_REFRESH_BEFORE_EXPIRY_DAYS);
-    let should_refresh = registry
+    Ok(registry
         .token_expires_at(node_id)
         .await
-        .is_none_or(|expires_at| expires_at <= refresh_after);
-    if !should_refresh {
-        return Ok(None);
-    }
+        .is_none_or(|expires_at| expires_at <= refresh_after))
+}
 
+/// 通过当前在线会话把新 token 下发给 Agent。
+///
+/// 关键顺序:
+/// 1. registry 先刷新并持久化新 token;
+/// 2. 只有成功把 `refresh_token_response` 推到 TCP 缓冲区后,才更新本地
+///    `session_token`;
+///    这样 send 失败时当前 session 会立刻结束,避免 server 内存和 agent 视图
+///    长时间不一致。
+async fn refresh_session_token(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    registry: &NodeRegistry,
+    node_id: &str,
+    session_token: &mut String,
+    trigger: &str,
+) -> Result<DateTime<Utc>> {
     let (new_token, expires_at) = registry.refresh_token(node_id).await?;
     info!(
         node_id = %node_id,
+        trigger,
         expires_at = %expires_at.to_rfc3339(),
-        "refreshed agent token before expiry",
+        "refreshed agent token",
     );
     let response =
         WireMessage::RefreshTokenResponse(ximonitor_proto::RefreshTokenResponseMessage {
@@ -404,7 +433,12 @@ async fn maybe_refresh_agent_token(
         });
     let payload = serde_json::to_string(&response)
         .map_err(|error| anyhow!("failed to serialize token refresh response: {error}"))?;
-    Ok(Some(PreparedTokenRefresh { payload, new_token }))
+    sender
+        .send(Message::Text(payload.into()))
+        .await
+        .map_err(|error| anyhow!("failed to send token refresh response: {error}"))?;
+    *session_token = new_token;
+    Ok(expires_at)
 }
 
 /// 阻塞接收 Hello 帧;期间收到的 Ping/Pong 等控制帧会被忽略,其他业务帧视为协议错误。

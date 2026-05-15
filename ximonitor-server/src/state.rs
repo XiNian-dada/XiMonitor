@@ -14,8 +14,39 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc, oneshot};
 use ximonitor_proto::{NodeIdentity, NodeSnapshot, NodeStatus, OverviewData, ServerConfig};
+
+/// 运行中的 WebSocket 会话可接收的控制命令。
+pub(crate) enum SessionCommand {
+    RefreshToken {
+        response: oneshot::Sender<Result<SessionRefreshReply, String>>,
+    },
+}
+
+/// 一次在线 token 续期完成后返回给调用方的摘要。
+#[derive(Debug, Clone)]
+pub(crate) struct SessionRefreshReply {
+    pub token_expires_at: DateTime<Utc>,
+}
+
+/// 向在线节点下发控制命令时可能遇到的失败类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionCommandError {
+    NodeOffline,
+    SessionClosed,
+}
+
+impl std::fmt::Display for SessionCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NodeOffline => f.write_str("node is offline"),
+            Self::SessionClosed => f.write_str("node session is no longer available"),
+        }
+    }
+}
+
+impl std::error::Error for SessionCommandError {}
 
 /// 共享状态的对外句柄,可以低成本地克隆给每个异步任务。
 #[derive(Clone)]
@@ -71,6 +102,17 @@ impl SharedState {
         registry.mark_disconnected(node_id, session_id);
     }
 
+    /// 把在线会话的控制通道挂到节点上,供 HTTP 处理器向该节点下发命令。
+    pub async fn attach_session_control(
+        &self,
+        node_id: &str,
+        session_id: u64,
+        control_tx: mpsc::UnboundedSender<SessionCommand>,
+    ) -> bool {
+        let mut registry = self.registry.write().await;
+        registry.attach_session_control(node_id, session_id, control_tx)
+    }
+
     /// 把超时(超过 `stale_after_secs`)的节点统一标记为离线,返回受影响节点数。
     pub async fn mark_stale(&self) -> usize {
         let mut registry = self.registry.write().await;
@@ -97,6 +139,27 @@ impl SharedState {
         registry.get_status(node_id)
     }
 
+    /// 对在线 Agent 发起一次“立即续期”请求,返回一个用于等待结果的 receiver。
+    pub async fn request_live_token_refresh(
+        &self,
+        node_id: &str,
+    ) -> Result<oneshot::Receiver<Result<SessionRefreshReply, String>>, SessionCommandError> {
+        let control_tx = {
+            let registry = self.registry.read().await;
+            registry
+                .session_control(node_id)
+                .ok_or(SessionCommandError::NodeOffline)?
+        };
+
+        let (response_tx, response_rx) = oneshot::channel();
+        control_tx
+            .send(SessionCommand::RefreshToken {
+                response: response_tx,
+            })
+            .map_err(|_| SessionCommandError::SessionClosed)?;
+        Ok(response_rx)
+    }
+
     /// 生成全局概览数据,用于仪表盘顶部的统计卡片。
     pub async fn overview(&self) -> OverviewData {
         let registry = self.registry.read().await;
@@ -120,6 +183,7 @@ struct Registry {
 struct NodeEntry {
     status: NodeStatus,
     active_session_id: Option<u64>,
+    control_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
 }
 
 impl Registry {
@@ -141,6 +205,7 @@ impl Registry {
                 online: true,
             },
             active_session_id: Some(session_id),
+            control_tx: None,
         });
 
         // 已存在的节点也要把身份与会话 ID 刷新成"最新连接"的版本。
@@ -150,6 +215,7 @@ impl Registry {
         entry.status.last_seen = Some(now);
         entry.status.latency_ms = None;
         entry.active_session_id = Some(session_id);
+        entry.control_tx = None;
     }
 
     fn update_snapshot(
@@ -197,7 +263,25 @@ impl Registry {
         if entry.active_session_id == Some(session_id) {
             entry.active_session_id = None;
             entry.status.online = false;
+            entry.control_tx = None;
         }
+    }
+
+    fn attach_session_control(
+        &mut self,
+        node_id: &str,
+        session_id: u64,
+        control_tx: mpsc::UnboundedSender<SessionCommand>,
+    ) -> bool {
+        let Some(entry) = self.nodes.get_mut(node_id) else {
+            return false;
+        };
+        if entry.active_session_id != Some(session_id) {
+            return false;
+        }
+
+        entry.control_tx = Some(control_tx);
+        true
     }
 
     fn mark_stale(&mut self, threshold: Duration, now: DateTime<Utc>) -> usize {
@@ -213,6 +297,7 @@ impl Registry {
             if elapsed >= threshold && entry.status.online {
                 entry.status.online = false;
                 entry.active_session_id = None;
+                entry.control_tx = None;
                 marked += 1;
             }
         }
@@ -244,6 +329,14 @@ impl Registry {
 
     fn get_status(&self, node_id: &str) -> Option<NodeStatus> {
         self.nodes.get(node_id).map(|entry| entry.status.clone())
+    }
+
+    fn session_control(&self, node_id: &str) -> Option<mpsc::UnboundedSender<SessionCommand>> {
+        let entry = self.nodes.get(node_id)?;
+        if entry.active_session_id.is_none() || !entry.status.online {
+            return None;
+        }
+        entry.control_tx.clone()
     }
 
     fn overview(&self) -> OverviewData {
@@ -311,6 +404,7 @@ impl Registry {
                 NodeEntry {
                     status,
                     active_session_id: None,
+                    control_tx: None,
                 },
             );
         }
@@ -332,10 +426,11 @@ mod tests {
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use tokio::sync::mpsc;
     use ximonitor_proto::{LoadAverage, MemoryUsage, NodeSnapshot};
     use ximonitor_proto::{NetworkCounters, percentage};
 
-    use super::Registry;
+    use super::{Registry, SessionCommand};
     use ximonitor_proto::NodeIdentity;
 
     #[test]
@@ -467,6 +562,41 @@ mod tests {
             .expect("average latency should be reported");
         assert!(average.is_finite());
         assert!(average > (u64::MAX as f64) / 4.0);
+    }
+
+    #[test]
+    fn session_control_is_only_available_for_current_online_session() {
+        let mut registry = Registry::default();
+        let now = Utc.with_ymd_and_hms(2026, 5, 7, 0, 0, 0).unwrap();
+        registry.register_node(7, sample_identity(), Some("198.51.100.10".to_string()), now);
+
+        let (control_tx, _control_rx) = mpsc::unbounded_channel::<SessionCommand>();
+        assert!(registry.attach_session_control("hk-01", 7, control_tx));
+        assert!(registry.session_control("hk-01").is_some());
+
+        registry.register_node(
+            8,
+            sample_identity(),
+            Some("198.51.100.11".to_string()),
+            now + ChronoDuration::seconds(1),
+        );
+        assert!(
+            registry.session_control("hk-01").is_none(),
+            "newer session should clear the previous control handle",
+        );
+    }
+
+    #[test]
+    fn mark_disconnected_clears_session_control() {
+        let mut registry = Registry::default();
+        let now = Utc.with_ymd_and_hms(2026, 5, 7, 0, 0, 0).unwrap();
+        registry.register_node(9, sample_identity(), Some("198.51.100.10".to_string()), now);
+
+        let (control_tx, _control_rx) = mpsc::unbounded_channel::<SessionCommand>();
+        assert!(registry.attach_session_control("hk-01", 9, control_tx));
+        registry.mark_disconnected("hk-01", 9);
+
+        assert!(registry.session_control("hk-01").is_none());
     }
 
     fn sample_identity() -> NodeIdentity {

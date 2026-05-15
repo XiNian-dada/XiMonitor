@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use axum::extract::{ConnectInfo, Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -11,6 +12,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use getrandom::fill as fill_random;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+use tokio::time::timeout;
 use tokio::{fs, process::Command};
 use tracing::{error, info};
 
@@ -23,10 +25,7 @@ use crate::auth::{
     verify_totp_step,
 };
 use crate::qr::qr_svg_for_text;
-use crate::registry::{
-    IssueNodeRequest, default_agent_release_base_url, issue_node, render_agent_config,
-    render_install_command, render_upgrade_command,
-};
+use crate::registry::render_agent_config;
 use crate::ui::{UI_I18N_JSON, index_html, node_html};
 use ximonitor_proto::{DEFAULT_HISTORY_RETENTION_HOURS, ReadonlyAuthConfig, parse_server_config};
 
@@ -152,14 +151,11 @@ pub(crate) struct SettingsActionResponse {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct NodeTokenRotationResponse {
+pub(crate) struct NodeTokenRefreshResponse {
     ok: bool,
     message: String,
     token_expires_at: Option<DateTime<Utc>>,
     token_expires_in_secs: Option<i64>,
-    install_token_expires_at: DateTime<Utc>,
-    install_command: String,
-    agent_upgrade_command: String,
 }
 
 /// 历史接口查询参数。默认查询最近 24 小时,也可用 start/end 指定 unix 秒级区间。
@@ -619,11 +615,12 @@ pub(crate) async fn start_server_update(
     }
 }
 
-/// 节点级敏感操作:轮换指定 Agent 的持久化 token,并立即生成一条新的重装命令。
+/// 节点级敏感操作:通过当前在线 WebSocket 会话立即续期指定 Agent 的 token。
 ///
-/// 这是一个显式运维动作。轮换后旧 token 会失效,现有 Agent 会在后续心跳 / 指标
-/// 上报时被服务端踢下线;调用方应尽快用返回的新安装命令在目标主机重装或更新配置。
-pub(crate) async fn rotate_node_token(
+/// 这条路径与服务端的自动续期使用同一套"刷新注册表 → 推送新 token 给 Agent →
+/// Agent 持久化到本地 agent.toml"逻辑。只有在线节点才能执行,离线节点不会落成
+/// "静默改 registry 导致当前 Agent 下次上线被拒绝"的危险状态。
+pub(crate) async fn refresh_node_token(
     State(state): State<AppState>,
     AxumPath(node_id): AxumPath<String>,
     Json(request): Json<StartServerUpdateRequest>,
@@ -644,95 +641,56 @@ pub(crate) async fn rotate_node_token(
         return response;
     }
 
-    let Some(node) = state
-        .registry
-        .list_registered_nodes()
-        .await
-        .into_iter()
-        .find(|node| node.node_id == node_id)
-    else {
+    let Some(node) = state.shared.get_status(&node_id).await else {
         return settings_json_error(StatusCode::NOT_FOUND, "node not found");
     };
-
-    let release_base_url = match default_agent_release_base_url() {
-        Ok(url) => url,
-        Err(error) => {
-            error!(error = ?error, "failed to resolve default agent release base url");
-            return settings_json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to resolve agent release source",
-            );
-        }
-    };
-
-    let issue_result = match issue_node(
-        state.registry.path(),
-        IssueNodeRequest {
-            node_id: node.node_id.clone(),
-            node_label: Some(node.node_label.clone()),
-            tags: node.tags.clone(),
-            rotate_token: true,
-        },
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            error!(error = ?error, node_id = %node.node_id, "failed to rotate agent token");
-            return settings_json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to rotate agent token",
-            );
-        }
-    };
-
-    if let Err(error) = state.registry.reload().await {
-        error!(error = ?error, node_id = %node.node_id, "failed to reload registry after token rotation");
+    if !node.online {
+        return settings_json_error(
+            StatusCode::CONFLICT,
+            "node is offline; online refresh requires an active agent session",
+        );
     }
 
-    let install_command = match render_install_command(
-        &state.shared.config().public_base_url,
-        &issue_result.install_token,
-        &release_base_url,
-    ) {
-        Ok(command) => command,
+    let refresh_receiver = match state.shared.request_live_token_refresh(&node_id).await {
+        Ok(receiver) => receiver,
         Err(error) => {
-            error!(error = ?error, node_id = %node.node_id, "failed to render node install command after token rotation");
+            return settings_json_error(StatusCode::CONFLICT, error.to_string());
+        }
+    };
+
+    let refresh_result = match timeout(Duration::from_secs(20), refresh_receiver).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => {
             return settings_json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to render node install command",
+                StatusCode::CONFLICT,
+                "agent session closed before refresh completed",
+            );
+        }
+        Err(_) => {
+            return settings_json_error(
+                StatusCode::GATEWAY_TIMEOUT,
+                "timed out waiting for agent token refresh",
             );
         }
     };
-    let agent_upgrade_command = match render_upgrade_command(
-        &state.shared.config().public_base_url,
-        &release_base_url,
-    ) {
-        Ok(command) => command,
-        Err(error) => {
-            error!(error = ?error, node_id = %node.node_id, "failed to render agent upgrade command");
-            return settings_json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to render agent upgrade command",
-            );
+
+    let token_expires_at = match refresh_result {
+        Ok(reply) => Some(reply.token_expires_at),
+        Err(message) => {
+            error!(node_id = %node_id, error = %message, "manual online token refresh failed");
+            return settings_json_error(StatusCode::BAD_GATEWAY, &message);
         }
     };
     let now = Utc::now();
 
     (
         StatusCode::OK,
-        Json(NodeTokenRotationResponse {
+        Json(NodeTokenRefreshResponse {
             ok: true,
-            message: "agent token rotated; redeploy the node with the new install command"
-                .to_string(),
-            token_expires_at: issue_result.node.token_expires_at,
-            token_expires_in_secs: issue_result
-                .node
-                .token_expires_at
+            message: "agent token refreshed and pushed to the online node".to_string(),
+            token_expires_at,
+            token_expires_in_secs: token_expires_at
                 .map(|expires_at| (expires_at - now).num_seconds()),
-            install_token_expires_at: issue_result.install_token_expires_at,
-            install_command,
-            agent_upgrade_command,
         }),
     )
         .into_response()
