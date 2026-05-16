@@ -116,7 +116,7 @@
         flex-direction: column;
         align-items: center;
         padding: 16px 0 20px;
-        gap: 14px;
+        gap: 18px;
         position: sticky;
         top: 0;
         height: 100vh;
@@ -153,6 +153,7 @@
       .nav-button:hover { color: var(--text-secondary); background: var(--bg-card-soft); }
       .nav-button.active { color: var(--accent-blue); background: var(--accent-blue-soft); }
       .nav-button svg { width: 20px; height: 20px; }
+      .nav-button + .nav-button { margin-top: 2px; }
       .sidebar-bottom { margin-top: auto; display: flex; flex-direction: column; align-items: center; gap: 10px; }
       .avatar {
         width: 36px;
@@ -1089,7 +1090,6 @@
       const I18N_ASSET_PATH = "__I18N_ASSET_PATH__";
       const LANGUAGE_STORAGE_KEY = "ximonitor.ui.language";
       const THEME_STORAGE_KEY = "ximonitor.ui.theme";
-      const ACTIVE_TAB_STORAGE_KEY = "ximonitor.ui.node-tab";
       const LATENCY_WARN_MS = 200;
       const RETENTION_WINDOW_HOURS = 24 * 14;
       const OVERVIEW_HISTORY_MAX_POINTS = 1440;
@@ -1171,11 +1171,16 @@
       function loadStoredTheme() {
         try { return window.localStorage.getItem(THEME_STORAGE_KEY); } catch (_e) { return null; }
       }
-      function storeActiveTab(name) {
-        try { window.localStorage.setItem(ACTIVE_TAB_STORAGE_KEY, name); } catch (_e) { /* ignore */ }
+      function loadTabFromHash() {
+        const raw = String(window.location.hash || "").replace(/^#/, "").trim().toLowerCase();
+        return raw || null;
       }
-      function loadStoredTab() {
-        try { return window.localStorage.getItem(ACTIVE_TAB_STORAGE_KEY); } catch (_e) { return null; }
+      function syncTabHash(name) {
+        const next = name === "overview" ? "" : `#${name}`;
+        const url = `${window.location.pathname}${window.location.search}${next}`;
+        if (url !== `${window.location.pathname}${window.location.search}${window.location.hash}`) {
+          window.history.replaceState(null, "", url);
+        }
       }
       function applyTheme(theme) {
         const next = theme === "light" ? "light" : "dark";
@@ -1312,7 +1317,7 @@
         document.querySelectorAll("[data-pane]").forEach((pane) => {
           pane.hidden = pane.dataset.pane !== name;
         });
-        if (options.persist !== false) storeActiveTab(name);
+        if (options.syncHash !== false) syncTabHash(name);
         if (name === "monitor") {
           renderBrushOverview();
           renderBigCharts(displayedHistory());
@@ -1331,6 +1336,9 @@
           const btn = e.target.closest("[data-tab]");
           if (!btn) return;
           setActiveTab(btn.dataset.tab);
+        });
+        window.addEventListener("hashchange", () => {
+          setActiveTab(loadTabFromHash() || "overview", { syncHash: false });
         });
       }
 
@@ -2432,7 +2440,7 @@
         });
         bindTabs();
         bindControls();
-        setActiveTab(loadStoredTab() || "overview", { persist: false });
+        setActiveTab(loadTabFromHash() || "overview", { syncHash: false });
         rerenderNode();
         document.addEventListener("visibilitychange", () => {
           if (document.hidden) return;
