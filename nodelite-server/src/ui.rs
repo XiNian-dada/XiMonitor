@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use tracing::error;
+
 /// 编译期嵌入的前端 i18n 字典,前端通过 `/assets/ui-i18n.json` 拉取。
 pub const UI_I18N_JSON: &str = include_str!("../assets/ui-i18n.json");
 /// 前端 i18n 字典对应的 HTTP 路径,统一注入到模板中。
@@ -39,9 +41,13 @@ fn cached_template(
     template: &str,
 ) -> &'static str {
     let cache = cache.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache
-        .lock()
-        .expect("template cache mutex should not be poisoned");
+    let mut cache = match cache.lock() {
+        Ok(cache) => cache,
+        Err(poisoned) => {
+            error!("template cache mutex poisoned; recovering cached templates");
+            poisoned.into_inner()
+        }
+    };
     if let Some(rendered) = cache.get(&refresh_interval_secs) {
         return rendered;
     }
