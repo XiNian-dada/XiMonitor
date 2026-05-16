@@ -633,6 +633,67 @@
         color: var(--text-muted);
       }
       .placeholder svg { margin-bottom: 12px; opacity: 0.6; }
+      .panel-subtext {
+        margin-top: 6px;
+        font-size: 12px;
+        line-height: 1.5;
+        color: var(--text-muted);
+      }
+      .log-stream {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        min-height: 120px;
+        max-height: 640px;
+        overflow: auto;
+      }
+      .log-entry {
+        border: 1px solid var(--border-soft);
+        border-radius: 14px;
+        padding: 12px 14px;
+        background: color-mix(in srgb, var(--bg-card) 92%, var(--bg-accent) 8%);
+      }
+      .log-meta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 8px;
+        flex-wrap: wrap;
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+      .log-level {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 999px;
+        padding: 4px 10px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+      }
+      .log-level.info {
+        background: color-mix(in srgb, var(--accent-blue) 14%, transparent);
+        color: var(--accent-blue);
+      }
+      .log-level.warn {
+        background: color-mix(in srgb, var(--accent-amber) 18%, transparent);
+        color: var(--accent-amber);
+      }
+      .log-level.error {
+        background: color-mix(in srgb, var(--accent-red) 14%, transparent);
+        color: var(--accent-red);
+      }
+      .log-text {
+        margin: 0;
+        color: var(--text-secondary);
+        font-size: 13px;
+        line-height: 1.65;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
       .settings-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1065,15 +1126,15 @@
 
         <!-- Logs / Settings placeholders -->
         <section class="tab-pane" data-pane="logs" hidden>
-          <div class="placeholder">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-              <line x1="9" y1="13" x2="15" y2="13" />
-              <line x1="9" y1="17" x2="15" y2="17" />
-            </svg>
-            <div data-i18n="node.placeholder.logs">Agents do not stream logs to the central server in this build.</div>
-          </div>
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <div class="panel-title" data-i18n="node.logs.title">Agent Runtime Logs</div>
+                <div class="panel-subtext" data-i18n="node.logs.subtitle">Recent logs reported by the agent help diagnose disconnects, retries, and token refresh issues.</div>
+              </div>
+            </div>
+            <div id="agent-logs-root" class="log-stream"></div>
+          </article>
         </section>
 
         <section class="tab-pane" data-pane="settings" hidden>
@@ -1109,6 +1170,8 @@
       let latestNode = null;
       let overviewHistory = [];
       let latestHistory = [];
+      let latestAgentLogs = [];
+      let nodeLogsError = "";
       let latestSettings = null;
       let latestNodeTokenRefresh = null;
       let nodeSettingsNotice = null;
@@ -1495,6 +1558,44 @@
           seen.add(key);
           return true;
         });
+      }
+
+      // ---------------- Rendering: Logs tab ----------------
+      function logLevelLabel(level) {
+        switch (String(level || "").toLowerCase()) {
+          case "warn": return t("node.logs.level_warn");
+          case "error": return t("node.logs.level_error");
+          default: return t("node.logs.level_info");
+        }
+      }
+      function renderAgentLogs() {
+        const root = document.getElementById("agent-logs-root");
+        if (!root) return;
+        if (nodeLogsError) {
+          root.innerHTML = `<div class="placeholder" style="padding:24px">${escapeHtml(t("node.logs.load_failed", { error: nodeLogsError }))}</div>`;
+          return;
+        }
+        if (!Array.isArray(latestAgentLogs) || latestAgentLogs.length === 0) {
+          root.innerHTML = `<div class="placeholder" style="padding:24px">${escapeHtml(t("node.logs.empty"))}</div>`;
+          return;
+        }
+        const rows = [...latestAgentLogs]
+          .slice()
+          .reverse()
+          .map((entry) => {
+            const level = String(entry.level || "info").toLowerCase();
+            return `
+              <article class="log-entry">
+                <div class="log-meta">
+                  <span class="log-level ${escapeHtml(level)}">${escapeHtml(logLevelLabel(level))}</span>
+                  <span>${escapeHtml(fmtDateTime(entry.occurred_at))}</span>
+                </div>
+                <pre class="log-text">${escapeHtml(entry.message || "")}</pre>
+              </article>
+            `;
+          })
+          .join("");
+        root.innerHTML = rows;
       }
 
       // ---------------- Rendering: Settings tab ----------------
@@ -2397,6 +2498,7 @@
           document.getElementById("title").textContent = t("node.loading");
           document.getElementById("updated").textContent = t("common.waiting_for_node_data");
         }
+        renderAgentLogs();
         const history = displayedHistory();
         renderOverviewCharts(history);
         renderBigCharts(history);
@@ -2424,6 +2526,14 @@
           console.warn("failed to refresh overview history", e);
           overviewHistory = [];
           latestHistory = [];
+        }
+        try {
+          latestAgentLogs = await fetchJson(`/api/nodes/${encodeURIComponent(NODE_ID)}/logs?limit=200`);
+          nodeLogsError = "";
+        } catch (e) {
+          console.warn("failed to refresh agent logs", e);
+          latestAgentLogs = [];
+          nodeLogsError = e.message || String(e);
         }
         ensureSelectionState();
         await fetchDetailHistory({ render: false });
