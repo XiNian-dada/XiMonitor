@@ -21,19 +21,88 @@ pub(super) fn settings_json_error(status: StatusCode, message: impl Into<String>
 }
 
 pub(super) fn validate_password_for_settings(password: &str) -> Result<(), &'static str> {
+    const MIN_PASSWORD_CHARS: usize = 12;
     const MAX_PASSWORD_CHARS: usize = 128;
 
-    if password.len() < 8 {
-        return Err("new password must be at least 8 characters");
+    // 长度检查
+    if password.len() < MIN_PASSWORD_CHARS {
+        return Err("new password must be at least 12 characters");
     }
     if password.chars().count() > MAX_PASSWORD_CHARS {
         return Err("new password must be at most 128 characters");
     }
-    if !password.chars().any(|c| c.is_alphabetic()) || !password.chars().any(|c| c.is_ascii_digit())
-    {
-        return Err("new password must include both letters and digits");
+
+    // 字符类型检查
+    let has_upper = password.chars().any(|c| c.is_uppercase());
+    let has_lower = password.chars().any(|c| c.is_lowercase());
+    let has_digit = password.chars().any(|c| c.is_ascii_digit());
+    let has_special = password.chars().any(|c| !c.is_alphanumeric());
+
+    if !has_upper {
+        return Err("new password must include at least one uppercase letter");
     }
+    if !has_lower {
+        return Err("new password must include at least one lowercase letter");
+    }
+    if !has_digit {
+        return Err("new password must include at least one digit");
+    }
+    if !has_special {
+        return Err("new password must include at least one special character");
+    }
+
+    // 常见密码检查
+    if is_common_password(password) {
+        return Err("new password is too common, please choose a stronger password");
+    }
+
     Ok(())
+}
+
+/// 检查是否为常见弱密码
+fn is_common_password(password: &str) -> bool {
+    // Top 100 最常见密码列表（小写）
+    const COMMON_PASSWORDS: &[&str] = &[
+        "password", "password1", "password123", "password12", "password1234",
+        "123456", "12345678", "123456789", "1234567890", "qwerty",
+        "abc123", "monkey", "1234567", "letmein", "trustno1",
+        "dragon", "baseball", "iloveyou", "master", "sunshine",
+        "ashley", "bailey", "passw0rd", "shadow", "123123",
+        "654321", "superman", "qazwsx", "michael", "football",
+        "welcome", "jesus", "ninja", "mustang", "password!",
+        "admin", "admin123", "root", "toor", "pass",
+        "test", "guest", "info", "adm", "mysql",
+        "user", "administrator", "oracle", "ftp", "pi",
+        "puppet", "ansible", "ec2-user", "vagrant", "azureuser",
+        "changeme", "changeme123", "default", "password@123", "p@ssw0rd",
+        "p@ssword", "passw0rd!", "admin@123", "root123", "test123",
+        "demo", "demo123", "sample", "temp", "temp123",
+        "nodelite", "monitor", "monitoring", "server", "agent",
+        "qwerty123", "abc123456", "password!", "letmein123", "welcome123",
+        "123qwe", "qwe123", "1q2w3e4r", "1qaz2wsx", "zxcvbnm",
+        "asdfgh", "qwertyuiop", "1234qwer", "qwer1234", "abcd1234",
+        "password1!", "password123!", "admin1234", "root1234", "pass1234",
+        "test1234", "demo1234", "temp1234", "user1234", "welcome1",
+        "admin123!@#", "admin123!@#$", "welcome123!@",
+    ];
+
+    let lower = password.to_lowercase();
+
+    // 检查完全匹配
+    if COMMON_PASSWORDS.contains(&lower.as_str()) {
+        return true;
+    }
+
+    // 检查是否包含常见密码作为子串（去除特殊字符后）
+    let alphanumeric: String = lower.chars().filter(|c| c.is_alphanumeric()).collect();
+    for common in COMMON_PASSWORDS {
+        let common_alphanum: String = common.chars().filter(|c| c.is_alphanumeric()).collect();
+        if !common_alphanum.is_empty() && alphanumeric == common_alphanum {
+            return true;
+        }
+    }
+
+    false
 }
 
 pub(super) fn server_update_log_path(config: &nodelite_proto::ServerConfig) -> PathBuf {
@@ -357,10 +426,74 @@ totp_secret = "JBSWY3DPEHPK3PXP"
 
     #[test]
     fn validate_password_for_settings_rejects_overlong_passwords() {
-        let password = format!("Aa1{}", "x".repeat(130));
+        let password = format!("Aa1!{}", "x".repeat(130));
         assert_eq!(
             validate_password_for_settings(&password),
             Err("new password must be at most 128 characters")
         );
+    }
+
+    #[test]
+    fn validate_password_for_settings_rejects_short_passwords() {
+        assert_eq!(
+            validate_password_for_settings("Short1!"),
+            Err("new password must be at least 12 characters")
+        );
+    }
+
+    #[test]
+    fn validate_password_for_settings_requires_uppercase() {
+        assert_eq!(
+            validate_password_for_settings("lowercase123!"),
+            Err("new password must include at least one uppercase letter")
+        );
+    }
+
+    #[test]
+    fn validate_password_for_settings_requires_lowercase() {
+        assert_eq!(
+            validate_password_for_settings("UPPERCASE123!"),
+            Err("new password must include at least one lowercase letter")
+        );
+    }
+
+    #[test]
+    fn validate_password_for_settings_requires_digit() {
+        assert_eq!(
+            validate_password_for_settings("NoDigitsHere!"),
+            Err("new password must include at least one digit")
+        );
+    }
+
+    #[test]
+    fn validate_password_for_settings_requires_special_char() {
+        assert_eq!(
+            validate_password_for_settings("NoSpecial123"),
+            Err("new password must include at least one special character")
+        );
+    }
+
+    #[test]
+    fn validate_password_for_settings_rejects_common_passwords() {
+        // 使用常见密码列表中的密码，但满足长度和复杂度要求
+        assert_eq!(
+            validate_password_for_settings("Password123!"),
+            Err("new password is too common, please choose a stronger password")
+        );
+        assert_eq!(
+            validate_password_for_settings("Admin123!@#$"),
+            Err("new password is too common, please choose a stronger password")
+        );
+        assert_eq!(
+            validate_password_for_settings("Welcome123!@"),
+            Err("new password is too common, please choose a stronger password")
+        );
+    }
+
+    #[test]
+    fn validate_password_for_settings_accepts_strong_passwords() {
+        assert!(validate_password_for_settings("MyStr0ng!Pass").is_ok());
+        assert!(validate_password_for_settings("C0mpl3x@Passw0rd!").is_ok());
+        assert!(validate_password_for_settings("Secure#2024$Pass").is_ok());
     }
 }

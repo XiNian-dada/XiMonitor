@@ -146,6 +146,29 @@ random_hex() {
   od -An -N"$bytes" -tx1 /dev/urandom | tr -d ' \n'
 }
 
+# 生成符合密码策略的强密码（至少12字符，包含大小写字母、数字、特殊字符）
+generate_strong_password() {
+  # 定义字符集
+  local uppercase="ABCDEFGHJKLMNPQRSTUVWXYZ"  # 去除易混淆的 I O
+  local lowercase="abcdefghijkmnopqrstuvwxyz"  # 去除易混淆的 l
+  local digits="23456789"  # 去除易混淆的 0 1
+  local special="!@#$%^&*-_=+"
+
+  # 确保至少包含每种字符类型
+  local password=""
+  password="${password}$(echo "$uppercase" | fold -w1 | shuf -n2 | tr -d '\n')"
+  password="${password}$(echo "$lowercase" | fold -w1 | shuf -n2 | tr -d '\n')"
+  password="${password}$(echo "$digits" | fold -w1 | shuf -n2 | tr -d '\n')"
+  password="${password}$(echo "$special" | fold -w1 | shuf -n2 | tr -d '\n')"
+
+  # 添加更多随机字符达到16位
+  local all_chars="${uppercase}${lowercase}${digits}${special}"
+  password="${password}$(echo "$all_chars" | fold -w1 | shuf -n8 | tr -d '\n')"
+
+  # 打乱顺序
+  echo "$password" | fold -w1 | shuf | tr -d '\n'
+}
+
 # 在 [20000, 40000) 区间内随机一个端口,降低默认监听端口被占用的概率。
 random_port() {
   raw_port="$(od -An -N2 -tu2 /dev/urandom | tr -d ' ')"
@@ -484,7 +507,7 @@ LISTEN_PORT_DEFAULT_VALUE="$(random_port)"
 PUBLIC_HOST_DEFAULT_VALUE=""
 PUBLIC_SCHEME_DEFAULT_VALUE="https"
 READONLY_USERNAME_DEFAULT_VALUE="viewer"
-READONLY_PASSWORD_DEFAULT_VALUE="$(random_hex 16)"
+READONLY_PASSWORD_DEFAULT_VALUE="$(generate_strong_password)"
 
 if [ "$MODE" = "upgrade" ] || [ "$MODE" = "migrate" ]; then
   load_existing_server_defaults "$CURRENT_CONFIG_PATH"
