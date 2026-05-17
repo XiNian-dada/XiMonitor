@@ -1,15 +1,15 @@
-// NodeLite 中心服务库与启动编排。
-//
-// 角色:
-// - 通过 `/ws` 接收 Agent 上报的 WebSocket 连接;
-// - 通过 `/api/*` 与静态 HTML 给前端提供只读视图;
-// - 通过 `install-agent` / `upgrade-agent` 子命令为运维生成安装脚本片段。
-//
-// 关键设计:
-// - `AppState` 由 `SharedState`(运行态)、`NodeRegistry`(凭证)与 `HistoryStore`(SQLite)组成,
-//   每个 HTTP / WebSocket 处理函数都得到一份廉价克隆。
-// - WebSocket 接入由 `WsAdmissionController` 做总量限流 + IP 限流 + 暴力破解封禁。
-// - 来自 Agent 的所有指标都经过 `sanitize_snapshot` 处理,防止异常值污染统计或图表。
+//! NodeLite 中心服务库与启动编排。
+//!
+//! 角色:
+//! - 通过 `/ws` 接收 Agent 上报的 WebSocket 连接;
+//! - 通过 `/api/*` 与静态 HTML 给前端提供只读视图;
+//! - 通过 `install-agent` / `upgrade-agent` 子命令为运维生成安装脚本片段。
+//!
+//! 关键设计:
+//! - `AppState` 由 `SharedState`(运行态)、`NodeRegistry`(凭证)与 `HistoryStore`(SQLite)组成,
+//!   每个 HTTP / WebSocket 处理函数都得到一份廉价克隆。
+//! - WebSocket 接入由 `WsAdmissionController` 做总量限流 + IP 限流 + 暴力破解封禁。
+//! - 来自 Agent 的所有指标都经过 `sanitize_snapshot` 处理,防止异常值污染统计或图表。
 
 mod admission;
 mod agent_logs;

@@ -1,9 +1,9 @@
-// 把 Agent 上报的 NodeSnapshot 二次校验为"可信"形态。
-//
-// Agent 进程是不受信任的输入源(可能是 buggy 版本、可能被攻陷),所以在
-// 进入聚合/历史表/UI 之前必须把不可能值卡到上限,否则会扭曲仪表盘汇总、
-// 压垮加和、或污染历史样本。本模块只负责清洗;什么时候断开异常会话由
-// 调用方根据 `SanitizationReport` + 滑动窗口决定。
+//! 把 Agent 上报的 NodeSnapshot 二次校验为"可信"形态。
+//!
+//! Agent 进程是不受信任的输入源(可能是 buggy 版本、可能被攻陷),所以在
+//! 进入聚合/历史表/UI 之前必须把不可能值卡到上限,否则会扭曲仪表盘汇总、
+//! 压垮加和、或污染历史样本。本模块只负责清洗;什么时候断开异常会话由
+//! 调用方根据 [`SanitizationReport`] + 滑动窗口决定。
 
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};

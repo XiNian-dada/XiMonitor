@@ -1,11 +1,11 @@
-// WebSocket 与 install 端点的准入控制。
-//
-// 三件事在一起:
-// 1. `WsAdmissionController` 对 `/ws` 做"总量 + 单 IP"并发限流,叠加认证失败封禁。
-// 2. `InstallAdmissionController` 仅按 IP 做认证失败封禁,因为 install 是
-//    一次性短请求,没有"活动连接数"概念,被复用为 `/api/verify-2fa` 的 IP 限流。
-// 3. `resolve_client_ip` 在反向代理场景下解析真实客户端 IP,以及 `AuthFailureState`
-//    及其 prune/sweep helpers 这两个 controller 共享。
+//! WebSocket 与 install 端点的准入控制。
+//!
+//! 三件事在一起:
+//! 1. [`WsAdmissionController`] 对 `/ws` 做"总量 + 单 IP"并发限流,叠加认证失败封禁。
+//! 2. [`InstallAdmissionController`] 仅按 IP 做认证失败封禁,因为 install 是
+//!    一次性短请求,没有"活动连接数"概念,被复用为 `/api/verify-2fa` 的 IP 限流。
+//! 3. [`resolve_client_ip`] 在反向代理场景下解析真实客户端 IP,以及 [`AuthFailureState`]
+//!    及其 prune/sweep helpers 这两个 controller 共享。
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};

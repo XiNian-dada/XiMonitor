@@ -1,14 +1,14 @@
-// WebSocket 入站会话处理。
-//
-// 从 `ws_handler`(/ws 路由入口)进来后,流程是:
-// 1. 通过 `WsAdmissionController` 拿到连接配额(RAII permit);
-// 2. 升级到 WebSocket;
-// 3. `handle_socket` 接管单个会话:Hello → registry.authorize → 进入 Ping
-//    心跳 + Metrics 数据循环 + 主动 token 轮换 + Refresh 请求处理;
-// 4. 会话退出时 SharedState/连接计数自动回收。
-//
-// 这是 server 内部最大的一段状态机,把它放到独立模块,使 main.rs 只剩
-// "组装路由 + 启动后台任务"的骨架。
+//! WebSocket 入站会话处理。
+//!
+//! 从 [`ws_handler`](/ws 路由入口)进来后,流程是:
+//! 1. 通过 `WsAdmissionController` 拿到连接配额(RAII permit);
+//! 2. 升级到 WebSocket;
+//! 3. `handle_socket` 接管单个会话:Hello → registry.authorize → 进入 Ping
+//!    心跳 + Metrics 数据循环 + 主动 token 轮换 + Refresh 请求处理;
+//! 4. 会话退出时 SharedState/连接计数自动回收。
+//!
+//! 这是 server 内部最大的一段状态机,把它放到独立模块,使 main.rs 只剩
+//! "组装路由 + 启动后台任务"的骨架。
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};

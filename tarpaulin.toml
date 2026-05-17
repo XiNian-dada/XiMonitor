@@ -1,0 +1,24 @@
+# cargo-tarpaulin 覆盖率配置
+# 运行: cargo tarpaulin --config tarpaulin.toml
+# 文档: https://github.com/xd009642/tarpaulin
+
+[default]
+# 排除测试辅助代码(它们本身不需要被覆盖)
+exclude-files = [
+    "nodelite-server/src/load_test.rs",
+    "nodelite-server/src/test_support.rs",
+]
+
+# 覆盖 workspace 内所有 crate
+workspace = true
+
+# 输出格式
+out = ["xml", "html"]
+output-dir = "target/tarpaulin"
+
+# 超时(秒):集成测试可能较慢
+timeout = "300"
+
+# 初始覆盖率阈值(低于此值 CI 失败)
+# 建议:首次运行后根据实际基线调整
+fail-under = 60

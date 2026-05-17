@@ -1,8 +1,8 @@
-// 主机指标采集器:负责读取 `/proc`、`statvfs` 等 Linux 内核接口,
-// 把原始数据归并成 `nodelite-proto` 中定义的快照与身份结构。
-//
-// 仅在 Linux 上提供真正实现;其他平台编译出的存根会在调用时返回错误,
-// 使得 `cargo build` 等开发工具在 macOS / Windows 上仍能成功。
+//! 主机指标采集器:负责读取 `/proc`、`statvfs` 等 Linux 内核接口,
+//! 把原始数据归并成 `nodelite-proto` 中定义的快照与身份结构。
+//!
+//! 仅在 Linux 上提供真正实现;其他平台编译出的存根会在调用时返回错误,
+//! 使得 `cargo build` 等开发工具在 macOS / Windows 上仍能成功。
 
 #[cfg(target_os = "linux")]
 mod imp {

@@ -1,5 +1,5 @@
-// 监控数据模型:描述节点身份、单次采样以及历史聚合等核心结构。
-// 这些类型同时被 Agent(生产数据)和 Server(消费、存储与下发到前端)使用。
+//! 监控数据模型:描述节点身份、单次采样以及历史聚合等核心结构。
+//! 这些类型同时被 Agent(生产数据)和 Server(消费、存储与下发到前端)使用。
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

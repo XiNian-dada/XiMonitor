@@ -1,5 +1,5 @@
-// Agent 与 Server 之间通过 WebSocket 交换的消息定义。
-// 所有消息均为 JSON 文本帧,顶层使用 `type` 字段进行内部标记式枚举区分。
+//! Agent 与 Server 之间通过 WebSocket 交换的消息定义。
+//! 所有消息均为 JSON 文本帧,顶层使用 `type` 字段进行内部标记式枚举区分。
 
 use serde::{Deserialize, Serialize};
 

@@ -1,3 +1,13 @@
+//! HTTP 路由处理器:面板页面、只读 JSON API、认证流程与 Agent 安装脚本下发。
+//!
+//! 本模块包含所有 Axum handler 函数,按功能分为:
+//! - 面板页面(`/`、`/nodes/:id`)与静态资源;
+//! - 只读 JSON API(`/api/overview`、`/api/nodes/:id/history` 等);
+//! - 认证中间件与 2FA 流程;
+//! - Agent 安装脚本下发(`/install/install-agent.sh`)与节点 bootstrap。
+//!
+//! 子模块 `settings` 处理管理面板的配置变更操作(密码修改、2FA 开关、服务端更新)。
+
 use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, Path as AxumPath, Query, State};

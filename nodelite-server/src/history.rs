@@ -1,10 +1,10 @@
-// 历史数据存储:把 `NodeStatus` 中的关键指标写入本地 SQLite 表,
-// 供前端绘制趋势图。设计目标:
-//
-// - 不阻塞实时 WebSocket 流程:所有 SQLite 调用都进入 `spawn_blocking`。
-// - 节流:同一节点两次写入至少间隔 `DEFAULT_HISTORY_WRITE_INTERVAL_SECS` 秒。
-// - 自清理:每 5 分钟最多触发一次 `DELETE`,把超过保留期的旧记录删除。
-// - 自降级:数据库初始化失败时不阻断服务,而是把 `available=false`,实时视图照常运行。
+//! 历史数据存储:把 `NodeStatus` 中的关键指标写入本地 SQLite 表,
+//! 供前端绘制趋势图。设计目标:
+//!
+//! - 不阻塞实时 WebSocket 流程:所有 SQLite 调用都进入 `spawn_blocking`。
+//! - 节流:同一节点两次写入至少间隔 `DEFAULT_HISTORY_WRITE_INTERVAL_SECS` 秒。
+//! - 自清理:每 5 分钟最多触发一次 `DELETE`,把超过保留期的旧记录删除。
+//! - 自降级:数据库初始化失败时不阻断服务,而是把 `available=false`,实时视图照常运行。
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;

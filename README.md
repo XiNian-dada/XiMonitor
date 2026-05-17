@@ -1,5 +1,8 @@
 ![NodeLite Banner](images/Banner.png)
 
+[![CI](https://github.com/XiNian-dada/NodeLite/actions/workflows/ci.yml/badge.svg)](https://github.com/XiNian-dada/NodeLite/actions/workflows/ci.yml)
+[![Coverage](https://github.com/XiNian-dada/NodeLite/actions/workflows/coverage.yml/badge.svg)](https://github.com/XiNian-dada/NodeLite/actions/workflows/coverage.yml)
+
 # NodeLite
 
 NodeLite 是一个用 Rust 编写的轻量级服务器监控面板，包含：
@@ -144,6 +147,32 @@ cargo test -p nodelite-server load_test_scaling_scores -- --ignored --nocapture
 ```bash
 cargo check
 ```
+
+## 测试覆盖率
+
+安装 [cargo-tarpaulin](https://github.com/xd009642/tarpaulin)(仅需一次,仅支持 Linux):
+
+```bash
+cargo install cargo-tarpaulin
+```
+
+运行覆盖率分析:
+
+```bash
+cargo tarpaulin --config tarpaulin.toml
+```
+
+HTML 报告输出到 `target/tarpaulin/tarpaulin-report.html`,可用浏览器打开查看逐行覆盖情况。
+
+### 覆盖率目标
+
+| 阶段 | 目标 | 时间 |
+| --- | --- | --- |
+| 基线 | 记录当前值 | 立即 |
+| 短期 | 75% | 2 周内 |
+| 长期 | 80% | 持续 |
+
+重点覆盖模块:auth、admission、sanitize、registry(安全关键路径)。
 
 ## 交叉编译 Linux x86_64 / aarch64
 

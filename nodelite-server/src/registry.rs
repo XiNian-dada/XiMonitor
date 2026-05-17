@@ -1,12 +1,12 @@
-// 节点注册表:服务端唯一的"哪些节点被允许上报"的事实来源。
-//
-// 注册表是一份 JSON 文件,内容由 `RegistryFile` 结构序列化得到。
-// 服务端进程与运维 CLI(`server install-agent` 等)都会读写这份文件,
-// 因此对每次写入都采用 flock + 原子替换的策略。
-//
-// 字段语义:
-// - `RegisteredNode`:被认证的 Agent 凭证(node_id + token)。
-// - `InstallSession`:一次性的"安装令牌",拥有它可以拉取 Agent 配置。
+//! 节点注册表:服务端唯一的"哪些节点被允许上报"的事实来源。
+//!
+//! 注册表是一份 JSON 文件,内容由 `RegistryFile` 结构序列化得到。
+//! 服务端进程与运维 CLI(`server install-agent` 等)都会读写这份文件,
+//! 因此对每次写入都采用 flock + 原子替换的策略。
+//!
+//! 字段语义:
+//! - [`RegisteredNode`]:被认证的 Agent 凭证(node_id + token)。
+//! - [`InstallSession`]:一次性的"安装令牌",拥有它可以拉取 Agent 配置。
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};

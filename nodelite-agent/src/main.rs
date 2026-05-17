@@ -1,14 +1,14 @@
-// NodeLite Agent 入口程序。
-//
-// 角色:运行在被监控的 Linux 节点上,周期性采集系统指标,
-// 通过 WebSocket 推送至中心 Server。
-//
-// 主要流程:
-// 1. 读取 TOML 配置 → 初始化日志与 rustls。
-// 2. 用 `HostCollector` 采集节点身份与首张快照(`--sample-once` 模式下直接打印退出)。
-// 3. 进入 `run_forever` 重连循环,内部通过 `run_session` 维护一次具体的会话。
-// 4. 在会话中处理:Hello → 等待服务器 `authenticated` 通知 → 周期性发送 Metrics
-//    → 响应 Ping / 处理 Close。
+//! NodeLite Agent 入口程序。
+//!
+//! 角色:运行在被监控的 Linux 节点上,周期性采集系统指标,
+//! 通过 WebSocket 推送至中心 Server。
+//!
+//! 主要流程:
+//! 1. 读取 TOML 配置 → 初始化日志与 rustls。
+//! 2. 用 `HostCollector` 采集节点身份与首张快照(`--sample-once` 模式下直接打印退出)。
+//! 3. 进入 `run_forever` 重连循环,内部通过 `run_session` 维护一次具体的会话。
+//! 4. 在会话中处理:Hello → 等待服务器 `authenticated` 通知 → 周期性发送 Metrics
+//!    → 响应 Ping / 处理 Close。
 
 mod collector;
 

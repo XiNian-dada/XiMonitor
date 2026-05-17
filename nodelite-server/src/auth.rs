@@ -1,13 +1,13 @@
-// Web 面板的认证层:
-//
-// - `ReadonlyRouteAuth` 把 `[auth]` 配置预先转成"期望的 Basic 头"+ 2FA 配置;
-// - `TwoFactorSessions` 把 pending / authenticated 票据保留在服务端内存里,
-//   并跟踪每个 pending 的连续失败次数和已经被消费过的 TOTP `time_step`;
-// - 顶层 helper(`verify_totp_step` / `cookie_*` / 常量时间比较)只暴露纯输入
-//   输出的小函数,使路由层不需要关心 TOTP / Base32 / cookie 字符串细节。
-//
-// 这一层不直接持有 `AppState`,避免 main.rs 的总状态结构反过来产生循环依赖。
-// 调用方在 handler 里把 `AppState` 拆成所需字段后再调用本模块。
+//! Web 面板的认证层:
+//!
+//! - [`ReadonlyRouteAuth`] 把 `[auth]` 配置预先转成"期望的 Basic 头"+ 2FA 配置;
+//! - [`TwoFactorSessions`] 把 pending / authenticated 票据保留在服务端内存里,
+//!   并跟踪每个 pending 的连续失败次数和已经被消费过的 TOTP `time_step`;
+//! - 顶层 helper(`verify_totp_step` / `cookie_*` / 常量时间比较)只暴露纯输入
+//!   输出的小函数,使路由层不需要关心 TOTP / Base32 / cookie 字符串细节。
+//!
+//! 这一层不直接持有 `AppState`,避免 main.rs 的总状态结构反过来产生循环依赖。
+//! 调用方在 handler 里把 `AppState` 拆成所需字段后再调用本模块。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
