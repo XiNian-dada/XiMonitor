@@ -148,6 +148,31 @@ cargo test -p nodelite-server load_test_scaling_scores -- --ignored --nocapture
 cargo check
 ```
 
+## Prometheus 抓取
+
+NodeLite 现在提供受保护的 `/metrics` 端点，输出 Prometheus exposition text。它和仪表盘共用只读认证，因此抓取端需要带上同一组 Basic Auth 凭据。
+
+先用 `curl` 验证：
+
+```bash
+curl -u viewer:secret https://monitor.example.com/metrics
+```
+
+Prometheus 示例：
+
+```yaml
+scrape_configs:
+  - job_name: nodelite
+    scheme: https
+    metrics_path: /metrics
+    basic_auth:
+      username: viewer
+      password: secret
+    static_configs:
+      - targets:
+          - monitor.example.com
+```
+
 ## 测试覆盖率
 
 安装 [cargo-tarpaulin](https://github.com/xd009642/tarpaulin)(仅需一次,仅支持 Linux):

@@ -191,6 +191,14 @@ impl SharedState {
         self.cached_api_json_bytes(ApiBodyKind::Nodes).await
     }
 
+    /// 返回当前对外视图需要的节点状态与聚合概览。
+    pub async fn statuses_and_overview(&self) -> (Vec<NodeStatus>, OverviewData) {
+        let registry = self.registry.read().await;
+        let statuses = registry.list_statuses();
+        let overview = registry.overview_from_statuses(&statuses);
+        (statuses, overview)
+    }
+
     /// 启动时从磁盘快照恢复状态,所有节点都视为离线直至首次心跳到达。
     pub async fn restore_statuses(&self, statuses: Vec<NodeStatus>) {
         let mut registry = self.registry.write().await;
@@ -213,15 +221,9 @@ impl SharedState {
             }
         }
 
-        let (nodes_body, overview_body) = {
-            let registry = self.registry.read().await;
-            let statuses = registry.list_statuses();
-            let overview = registry.overview_from_statuses(&statuses);
-            (
-                Bytes::from(serde_json::to_vec(&statuses)?),
-                Bytes::from(serde_json::to_vec(&overview)?),
-            )
-        };
+        let (statuses, overview) = self.statuses_and_overview().await;
+        let nodes_body = Bytes::from(serde_json::to_vec(&statuses)?);
+        let overview_body = Bytes::from(serde_json::to_vec(&overview)?);
 
         let selected = match kind {
             ApiBodyKind::Nodes => nodes_body.clone(),

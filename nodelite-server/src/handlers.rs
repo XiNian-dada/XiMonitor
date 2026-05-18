@@ -8,6 +8,7 @@
 //!
 //! 子模块 `settings` 处理管理面板的配置变更操作(密码修改、2FA 开关、服务端更新)。
 
+use std::fmt::Write;
 use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, Path as AxumPath, Query, State};
@@ -46,6 +47,8 @@ const DEFAULT_HISTORY_WINDOW_HOURS: u64 = 24;
 const DEFAULT_HISTORY_MAX_POINTS: usize = 480;
 /// 历史接口最多返回的样本点数。
 const MAX_HISTORY_MAX_POINTS: usize = 1440;
+/// Prometheus exposition format 的 content-type。
+const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 /// 节点日志接口默认返回条数。
 const DEFAULT_NODE_LOG_LIMIT: usize = 120;
 /// 节点日志接口最多返回条数。
@@ -548,6 +551,21 @@ pub(crate) async fn nodes(State(state): State<AppState>) -> Response {
     }
 }
 
+/// Prometheus 指标导出,供外部监控抓取全局概览与节点在线状态。
+pub(crate) async fn metrics(State(state): State<AppState>) -> Response {
+    let (statuses, overview) = state.shared.statuses_and_overview().await;
+    let body = render_prometheus_metrics(&state, &statuses, &overview);
+    (
+        [
+            (header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE),
+            (header::CACHE_CONTROL, "no-store, no-cache, must-revalidate"),
+            (header::PRAGMA, "no-cache"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 /// 单个节点的最新状态;不存在时返回 404。
 pub(crate) async fn node_status(
     State(state): State<AppState>,
@@ -635,4 +653,184 @@ fn bearer_token_from_request(request: &Request) -> Option<&str> {
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+fn render_prometheus_metrics(
+    state: &AppState,
+    statuses: &[nodelite_proto::NodeStatus],
+    overview: &nodelite_proto::OverviewData,
+) -> String {
+    let mut body = String::new();
+
+    push_gauge_metric(
+        &mut body,
+        "nodelite_server_ready",
+        "Whether the NodeLite server is ready to serve protected traffic.",
+        &[],
+        if state.readiness.is_ready() { 1 } else { 0 },
+    );
+    push_gauge_metric(
+        &mut body,
+        "nodelite_history_available",
+        "Whether the history store is currently available.",
+        &[],
+        if state.readiness.history_available() {
+            1
+        } else {
+            0
+        },
+    );
+    push_gauge_metric(
+        &mut body,
+        "nodelite_registry_reload_healthy",
+        "Whether the registry reload loop is currently healthy.",
+        &[],
+        if state.readiness.registry_reload_healthy() {
+            1
+        } else {
+            0
+        },
+    );
+    push_gauge_metric(
+        &mut body,
+        "nodelite_nodes_total",
+        "Number of registered nodes known to the dashboard.",
+        &[],
+        overview.total_nodes,
+    );
+    push_gauge_metric(
+        &mut body,
+        "nodelite_nodes_online",
+        "Number of nodes currently considered online.",
+        &[],
+        overview.online_nodes,
+    );
+    push_gauge_metric(
+        &mut body,
+        "nodelite_nodes_offline",
+        "Number of nodes currently considered offline.",
+        &[],
+        overview.offline_nodes,
+    );
+    push_gauge_metric(
+        &mut body,
+        "nodelite_network_total_bytes",
+        "Summed network bytes reported by all nodes.",
+        &[("direction", "rx")],
+        overview.total_rx_bytes,
+    );
+    push_gauge_metric(
+        &mut body,
+        "nodelite_network_total_bytes",
+        "Summed network bytes reported by all nodes.",
+        &[("direction", "tx")],
+        overview.total_tx_bytes,
+    );
+    push_gauge_metric(
+        &mut body,
+        "nodelite_network_rate_bytes_per_second",
+        "Summed instantaneous network rate reported by all nodes.",
+        &[("direction", "rx")],
+        overview.current_rx_bytes_per_sec,
+    );
+    push_gauge_metric(
+        &mut body,
+        "nodelite_network_rate_bytes_per_second",
+        "Summed instantaneous network rate reported by all nodes.",
+        &[("direction", "tx")],
+        overview.current_tx_bytes_per_sec,
+    );
+    if let Some(average_latency_ms) = overview.average_latency_ms
+        && average_latency_ms.is_finite()
+    {
+        push_gauge_metric(
+            &mut body,
+            "nodelite_latency_average_milliseconds",
+            "Average latency across online nodes.",
+            &[],
+            average_latency_ms,
+        );
+    }
+
+    for status in statuses {
+        let node_labels = [
+            ("node_id", status.identity.node_id.as_str()),
+            ("node_label", status.identity.node_label.as_str()),
+            ("hostname", status.identity.hostname.as_str()),
+            ("os", status.identity.os.as_str()),
+        ];
+        push_gauge_metric(
+            &mut body,
+            "nodelite_node_online",
+            "Whether the node is currently online.",
+            &node_labels,
+            if status.online { 1 } else { 0 },
+        );
+        if let Some(last_seen) = status.last_seen {
+            push_gauge_metric(
+                &mut body,
+                "nodelite_node_last_seen_timestamp_seconds",
+                "Last time the node was seen by the server as a Unix timestamp.",
+                &node_labels,
+                last_seen.timestamp(),
+            );
+        }
+        if let Some(latency_ms) = status.latency_ms {
+            push_gauge_metric(
+                &mut body,
+                "nodelite_node_latency_milliseconds",
+                "Latest measured node latency in milliseconds.",
+                &node_labels,
+                latency_ms,
+            );
+        }
+        if let Some(snapshot) = status.snapshot.as_ref() {
+            push_gauge_metric(
+                &mut body,
+                "nodelite_node_snapshot_timestamp_seconds",
+                "Collection time of the latest node snapshot as a Unix timestamp.",
+                &node_labels,
+                snapshot.collected_at.timestamp(),
+            );
+        }
+    }
+
+    body
+}
+
+fn push_gauge_metric<T: std::fmt::Display>(
+    body: &mut String,
+    name: &str,
+    help: &str,
+    labels: &[(&str, &str)],
+    value: T,
+) {
+    let _ = writeln!(body, "# HELP {name} {help}");
+    let _ = writeln!(body, "# TYPE {name} gauge");
+    body.push_str(name);
+    if !labels.is_empty() {
+        body.push('{');
+        for (index, (key, raw_value)) in labels.iter().enumerate() {
+            if index > 0 {
+                body.push(',');
+            }
+            let escaped = escape_prometheus_label_value(raw_value);
+            let _ = write!(body, "{key}=\"{escaped}\"");
+        }
+        body.push('}');
+    }
+    let _ = writeln!(body, " {value}");
+}
+
+fn escape_prometheus_label_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }

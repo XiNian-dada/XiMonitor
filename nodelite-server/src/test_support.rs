@@ -26,7 +26,7 @@ use crate::ServerReadiness;
 use crate::admission::{InstallAdmissionConfig, InstallAdmissionController, WsAdmissionController};
 use crate::agent_logs::AgentLogStore;
 use crate::auth::{ReadonlyRouteAuth, TwoFactorSessions};
-use crate::handlers::{node_history, node_status, nodes, overview, require_readonly_auth};
+use crate::handlers::{metrics, node_history, node_status, nodes, overview, require_readonly_auth};
 use crate::history::HistoryStore;
 use crate::registry::{IssueNodeRequest, NodeRegistry, issue_node};
 use crate::set_protected_response_headers;
@@ -144,6 +144,7 @@ impl TestServer {
         let shared = state.shared.clone();
         let protected_routes = Router::new()
             .route("/api/overview", get(overview))
+            .route("/metrics", get(metrics))
             .route("/api/nodes", get(nodes))
             .route("/api/nodes/{node_id}", get(node_status))
             .route("/api/nodes/{node_id}/history", get(node_history))
@@ -205,6 +206,10 @@ impl TestServer {
 
     pub async fn nodes(&self) -> Result<Vec<NodeStatus>> {
         self.fetch_json("/api/nodes").await
+    }
+
+    pub async fn metrics_text(&self) -> Result<String> {
+        fetch_http_body(self.addr, "/metrics").await
     }
 
     pub async fn node_status(&self, node_id: &str) -> Result<NodeStatus> {
