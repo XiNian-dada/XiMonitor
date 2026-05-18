@@ -199,7 +199,7 @@ impl TestServer {
         Ok(TestNode {
             node_id: issued.node.node_id,
             node_label: issued.node.node_label,
-            token: issued.node.token,
+            token: issued.node_session_token,
         })
     }
 
@@ -296,7 +296,24 @@ impl TestServer {
     }
 
     pub async fn is_token_current(&self, node_id: &str, token: &str) -> bool {
-        self.registry.is_token_current(node_id, token).await
+        let identity = NodeIdentity {
+            node_id: node_id.to_string(),
+            node_label: node_id.to_string(),
+            hostname: format!("{node_id}.test"),
+            os: "test".to_string(),
+            kernel_version: None,
+            cpu_model: None,
+            cpu_cores: 1,
+            agent_version: "0.1.0-test".to_string(),
+            boot_time: None,
+            tags: Vec::new(),
+        };
+        let Ok(authorized) = self.registry.authorize(&identity, token).await else {
+            return false;
+        };
+        self.registry
+            .is_token_current(node_id, authorized.generation)
+            .await
     }
 
     pub async fn shutdown(self) -> Result<()> {

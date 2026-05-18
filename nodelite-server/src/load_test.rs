@@ -170,7 +170,7 @@ impl TestServer {
             credentials.push(AgentCredential {
                 node_id,
                 node_label,
-                token: issued.node.token,
+                token: issued.node_session_token,
             });
         }
 

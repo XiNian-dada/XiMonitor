@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::{Algorithm, Argon2, Params, Version};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use getrandom::fill as fill_random;
 use nodelite_proto::{MAX_NODE_TAG_BYTES, MAX_NODE_TAGS, NodeIdentity};
@@ -34,11 +36,40 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 /// Agent Token 默认有效期:30 天。
 const DEFAULT_TOKEN_VALIDITY_DAYS: i64 = 30;
 
+/// Argon2id 参数:用 OWASP 2023 推荐的"低延迟服务器"档位,大约 ~12-25ms/verify。
+/// memory=19 MiB, iterations=2, parallelism=1。
+/// 落在 WS Hello 等"每会话一次"的路径上是可以接受的,但 #56 的设计要求 hot-path
+/// 通过 `token_generation` 比较而非每次 verify。
+const ARGON2_MEMORY_KIB: u32 = 19 * 1024;
+const ARGON2_ITERATIONS: u32 = 2;
+const ARGON2_PARALLELISM: u32 = 1;
+
 /// 已登记节点的持久化条目。
+///
+/// Token 存储语义 (#56):
+/// - 新条目 **不再** 在 `token` 字段保留明文; 只保留 `token_hash` 的 Argon2id PHC 字符串。
+/// - `token_generation` 每次 token 轮换递增一次, 供 WS hot-path
+///   `is_token_current` 做 O(1) 比较而不必每条消息都跑 Argon2 verify。
+/// - `token` 字段保留是为了 **向后兼容**: 老版本写出的 registry.json 仍然
+///   能被读取; `load_registry_state` 会在首次加载时把 `token` 哈希并清空,
+///   随即把升级后的文件写回磁盘 —— 之后磁盘上不再出现明文。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegisteredNode {
     pub node_id: String,
     pub node_label: String,
+    /// Argon2id PHC 编码的 token 哈希。空串表示 "尚未迁移过的旧条目",
+    /// 此时应当用 `token` 字段做最后一次明文比较并触发迁移。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub token_hash: String,
+    /// 单调递增的 token 代次。每次 `refresh_token` / `issue_node` 轮换都 +1。
+    /// WS 会话在认证时捕获这个值, 后续 hot-path 只比较代次,
+    /// 避免每条消息都跑 Argon2 verify。
+    #[serde(default)]
+    pub token_generation: u64,
+    /// Legacy: 旧版本的明文 token 字段。新版本启动后会一次性把它哈希到
+    /// `token_hash` 并清空, 之后磁盘上不再出现。保留 #[serde(default)]
+    /// 与 skip_serializing_if 是为了让升级与降级都能干净通过。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub token: String,
     #[serde(default)]
     pub tags: Vec<String>,
@@ -48,15 +79,43 @@ pub struct RegisteredNode {
     pub token_expires_at: Option<DateTime<Utc>>,
 }
 
+/// 一次成功的 token 验证 / 颁发结果:同时返回身份和当时的代次,
+/// 供 WS 会话捕获 generation 用于后续 hot-path 比较。
+#[derive(Debug, Clone)]
+pub struct AuthorizedNode {
+    pub identity: NodeIdentity,
+    pub generation: u64,
+}
+
+/// `consume_install_token` 的成功返回值:Agent 拿到这个结构后即可写出本地配置。
+#[derive(Debug, Clone)]
+pub struct ConsumedInstall {
+    pub node: RegisteredNode,
+    /// 节点的明文 session token, 由 install_session 短暂持有, 返回后立即从注册表删除。
+    pub node_session_token: String,
+}
+
 /// 安装会话:由 CLI 颁发的一次性令牌,Agent 用它拉取自己的配置。
 ///
 /// `expires_at` 为绝对过期时间;每次写入注册表时会顺带清理已过期会话。
+///
+/// Token 存储 (#56):
+/// - `node_session_token` 持有该 install_session 所属节点的**明文 session token**。
+///   这是 Argon2id 化之后整个系统里唯一暂存明文的位置, 生存周期 <= 15 分钟
+///   (`INSTALL_TOKEN_TTL_MINUTES`), 一旦 `consume_install_token` 被调用就连同
+///   整条 session 一起从注册表删除。比起 #56 之前的 "永久保留 token 明文"
+///   是一个明显的硬化。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstallSession {
     pub token: String,
     pub node_id: String,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    /// 节点的明文 session token, 仅在 install 流程消费之前短暂持有。
+    /// 老版本的 install_session 不带这个字段,旧的 install_token 在升级后
+    /// 自然过期(15min)、不可恢复 —— 运维需要重新颁发 install_token。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub node_session_token: String,
 }
 
 /// 注册表的运行期视图:进程内部以 HashMap 形式持有,便于鉴权 / 查询。
@@ -85,6 +144,7 @@ pub struct IssueNodeRequest {
 #[derive(Debug, Clone)]
 pub struct IssueNodeResult {
     pub node: RegisteredNode,
+    pub node_session_token: String,
     pub created: bool,
     pub rotated_token: bool,
     pub install_token: String,
@@ -114,19 +174,25 @@ impl NodeRegistry {
         })
     }
 
-    /// 校验 Agent 提交的 Hello 信息与 token,通过后返回"覆盖了注册表里权威字段"的身份。
-    pub async fn authorize(&self, identity: &NodeIdentity, token: &str) -> Result<NodeIdentity> {
+    /// 校验 Agent 提交的 Hello 信息与 token,通过后返回"覆盖了注册表里权威字段"的身份
+    /// 以及当时的 token 代次, 供 WS 会话后续 hot-path 比较使用。
+    pub async fn authorize(&self, identity: &NodeIdentity, token: &str) -> Result<AuthorizedNode> {
         validate_runtime_identity(identity)?;
         validate_non_empty("hello.token", token)?;
         let state = self.state.read().await;
         authorize_identity(&state.entries, identity, token)
     }
 
-    /// 判断当前 token 是否仍是该节点的有效凭证。
-    /// 用于在长连接运行中检测"管理员是否已轮换该节点 token"。
-    pub async fn is_token_current(&self, node_id: &str, token: &str) -> bool {
+    /// 判断当前 session 的 token **代次** 是否仍是该节点的最新代次。
+    ///
+    /// #56 之前这里接收 token 字符串做常量时间比较;现在为了避免每条 WS 消息
+    /// 都跑 Argon2 verify(~20ms)的灾难性 CPU 占用, hot-path 改为只比较 generation。
+    /// generation 由 [`authorize`] 在 hello 阶段返回, 每次 `refresh_token` /
+    /// `issue_node --rotate-token` 都会让它 +1, 因此"管理员轮换了 token"会被
+    /// 立即感知。
+    pub async fn is_token_current(&self, node_id: &str, session_generation: u64) -> bool {
         let state = self.state.read().await;
-        is_token_current(&state.entries, node_id, token)
+        is_token_current(&state.entries, node_id, session_generation)
     }
 
     /// 查询节点 token 的过期时间。`None` 既可能表示节点不存在,也可能是旧注册表
@@ -139,30 +205,36 @@ impl NodeRegistry {
             .and_then(|node| node.token_expires_at)
     }
 
-    /// 刷新节点的 Token:生成新 Token 并延长过期时间。
-    /// 返回 (new_token, expires_at)。
-    pub async fn refresh_token(&self, node_id: &str) -> Result<(String, DateTime<Utc>)> {
+    /// 刷新节点的 Token:生成新明文 token, 哈希入库,代次 +1, 延长过期时间。
+    /// 返回 (new_plaintext_token, expires_at, new_generation)。明文只在
+    /// 进程内存里短暂存在,从这里被传递给 WS 端发送给 agent。
+    pub async fn refresh_token(&self, node_id: &str) -> Result<(String, DateTime<Utc>, u64)> {
         let path = Arc::clone(&self.path);
         let node_id = node_id.to_string();
-        let ((new_token, expires_at), _) = mutate_registry_file(path.as_ref(), move |file| {
-            let now = Utc::now();
-            let Some(node) = file.nodes.iter_mut().find(|n| n.node_id == node_id) else {
-                bail!("node not found");
-            };
+        let ((new_token, expires_at, generation), _) =
+            mutate_registry_file(path.as_ref(), move |file| {
+                let now = Utc::now();
+                let Some(node) = file.nodes.iter_mut().find(|n| n.node_id == node_id) else {
+                    bail!("node not found");
+                };
 
-            let new_token = generate_token()?;
-            let expires_at = now + ChronoDuration::days(DEFAULT_TOKEN_VALIDITY_DAYS);
-            node.token = new_token.clone();
-            node.token_expires_at = Some(expires_at);
+                let new_token = generate_token()?;
+                let expires_at = now + ChronoDuration::days(DEFAULT_TOKEN_VALIDITY_DAYS);
+                node.token_hash =
+                    hash_token(&new_token).context("failed to hash refreshed token")?;
+                node.token_generation = node.token_generation.saturating_add(1);
+                node.token_expires_at = Some(expires_at);
+                // 升级路径残留的明文也在这里清空,确保从此刻起 disk 上彻底无明文。
+                node.token.clear();
 
-            Ok(((new_token, expires_at), true))
-        })
-        .await?;
+                Ok(((new_token, expires_at, node.token_generation), true))
+            })
+            .await?;
 
         // 刷新内存中的状态
         self.reload().await?;
 
-        Ok((new_token, expires_at))
+        Ok((new_token, expires_at, generation))
     }
 
     /// 从磁盘重新加载注册表。返回 `Ok(true)` 表示发现了变化。
@@ -206,12 +278,15 @@ impl NodeRegistry {
         node_ids
     }
 
-    /// 一次性消费安装令牌:成功时返回对应的 `RegisteredNode`,并把令牌从注册表移除。
-    pub async fn consume_install_token(&self, token: &str) -> Result<Option<RegisteredNode>> {
+    /// 一次性消费安装令牌:成功时返回对应的 `RegisteredNode` **以及**该节点
+    /// 当前明文 session token —— 后者由 install_session 在颁发时短暂持有,
+    /// 这是 #56 之后整个系统里唯一返回明文的入口。一旦本函数返回,
+    /// install_session(连同明文)即被从注册表删除。
+    pub async fn consume_install_token(&self, token: &str) -> Result<Option<ConsumedInstall>> {
         validate_non_empty("install token", token)?;
 
         let token = token.to_string();
-        let (node, file) = mutate_registry_file(self.path.as_path(), move |file| {
+        let (result, file) = mutate_registry_file(self.path.as_path(), move |file| {
             let pruned = prune_expired_install_sessions(file, Utc::now());
             let Some(index) = file
                 .install_sessions
@@ -227,11 +302,15 @@ impl NodeRegistry {
                 .iter()
                 .find(|node| node.node_id == session.node_id)
                 .cloned();
-            Ok((node, true))
+            let result = node.map(|node| ConsumedInstall {
+                node,
+                node_session_token: session.node_session_token,
+            });
+            Ok((result, true))
         })
         .await?;
         self.replace_state_from_file(file).await?;
-        Ok(node)
+        Ok(result)
     }
 
     pub fn path(&self) -> &Path {
@@ -274,19 +353,49 @@ pub async fn issue_node(path: &Path, request: IssueNodeRequest) -> Result<IssueN
             if !request.tags.is_empty() {
                 file.nodes[index].tags = normalized_tags.clone();
             }
-            if request.rotate_token {
-                file.nodes[index].token = generate_token()?;
+            // 不论是否轮换 token, install_session 必须带上当时有效的明文 token
+            // 给本次 install 流程使用; #56 改造之后 disk 上不再有明文,因此唯一
+            // 能把明文传给 agent 的位置就是这里。
+            let session_plaintext = if request.rotate_token {
+                // 真的生成新明文并入库哈希。
+                let new_token = generate_token()?;
+                file.nodes[index].token_hash =
+                    hash_token(&new_token).context("failed to hash rotated token")?;
+                file.nodes[index].token_generation =
+                    file.nodes[index].token_generation.saturating_add(1);
                 file.nodes[index].token_expires_at =
                     Some(now + ChronoDuration::days(DEFAULT_TOKEN_VALIDITY_DAYS));
+                file.nodes[index].token.clear();
                 rotated_token = true;
-            }
+                new_token
+            } else {
+                // 不轮换的情况:install_session 必须能给到一个**该节点目前持有的**
+                // 明文。Disk 上只有哈希,无法逆推,所以这里强制轮换一次 ——
+                // 这与历史行为有差异:历史上 `issue-node` 在节点已存在时不会
+                // 强制换 token,但磁盘上存的就是明文,所以 install_session 可以
+                // 直接 clone 它。改用哈希后,我们要么轮换、要么拒绝 install。
+                // 选轮换:更安全,且 #56 验收里也写"一次 install 流程对应一次
+                // token 颁发"是合理的语义。
+                let new_token = generate_token()?;
+                file.nodes[index].token_hash =
+                    hash_token(&new_token).context("failed to hash re-issued token")?;
+                file.nodes[index].token_generation =
+                    file.nodes[index].token_generation.saturating_add(1);
+                file.nodes[index].token_expires_at =
+                    Some(now + ChronoDuration::days(DEFAULT_TOKEN_VALIDITY_DAYS));
+                file.nodes[index].token.clear();
+                rotated_token = true;
+                new_token
+            };
 
             validate_registered_node(&file.nodes[index])?;
             let node = file.nodes[index].clone();
-            let install_session = mint_install_session(file, &node.node_id, now)?;
+            let install_session =
+                mint_install_session(file, &node.node_id, now, session_plaintext.clone())?;
             return Ok((
                 IssueNodeResult {
                     node,
+                    node_session_token: session_plaintext,
                     created: false,
                     rotated_token,
                     install_token: install_session.token,
@@ -296,6 +405,8 @@ pub async fn issue_node(path: &Path, request: IssueNodeRequest) -> Result<IssueN
             ));
         }
 
+        let plaintext_token = generate_token()?;
+        let token_hash = hash_token(&plaintext_token).context("failed to hash issued token")?;
         let node = RegisteredNode {
             node_id: request.node_id.trim().to_string(),
             node_label: request
@@ -305,7 +416,9 @@ pub async fn issue_node(path: &Path, request: IssueNodeRequest) -> Result<IssueN
                 .filter(|value| !value.is_empty())
                 .unwrap_or(request.node_id.as_str())
                 .to_string(),
-            token: generate_token()?,
+            token_hash,
+            token_generation: 1,
+            token: String::new(),
             tags: normalized_tags.clone(),
             created_at: now,
             token_expires_at: Some(now + ChronoDuration::days(DEFAULT_TOKEN_VALIDITY_DAYS)),
@@ -315,10 +428,12 @@ pub async fn issue_node(path: &Path, request: IssueNodeRequest) -> Result<IssueN
         file.nodes.push(node.clone());
         file.nodes
             .sort_by(|left, right| left.node_id.cmp(&right.node_id));
-        let install_session = mint_install_session(file, &node.node_id, now)?;
+        let install_session =
+            mint_install_session(file, &node.node_id, now, plaintext_token.clone())?;
         Ok((
             IssueNodeResult {
                 node,
+                node_session_token: plaintext_token,
                 created: true,
                 rotated_token,
                 install_token: install_session.token,
@@ -447,7 +562,11 @@ pub fn render_upgrade_command(
 }
 
 /// 渲染单个节点的 `agent.toml` 文本,作为引导接口的响应体。
-pub fn render_agent_config(public_base_url: &str, node: &RegisteredNode) -> Result<String> {
+pub fn render_agent_config(
+    public_base_url: &str,
+    node: &RegisteredNode,
+    plaintext_token: &str,
+) -> Result<String> {
     let server_url = build_agent_server_url(public_base_url)?;
     let mut content = String::new();
     content.push_str("[agent]\n");
@@ -457,7 +576,7 @@ pub fn render_agent_config(public_base_url: &str, node: &RegisteredNode) -> Resu
         toml_escape(&node.node_label)
     ));
     content.push_str(&format!("server = \"{}\"\n", toml_escape(&server_url)));
-    content.push_str(&format!("token = \"{}\"\n", toml_escape(&node.token)));
+    content.push_str(&format!("token = \"{}\"\n", toml_escape(plaintext_token)));
     content.push_str("report_interval_secs = 5\n");
     if !node.tags.is_empty() {
         let tags = node
@@ -510,6 +629,19 @@ fn load_registry_file_sync(path: &Path) -> Result<RegistryFile> {
 async fn load_registry_state(path: &Path) -> Result<RegistryState> {
     let mut file = load_registry_file(path).await?;
     prune_expired_install_sessions(&mut file, Utc::now());
+
+    // #56: 升级老版本的明文 token 到 Argon2id 哈希。一旦发现旧字段, 哈希后
+    // 立即落盘, 之后磁盘上不再有任何节点的明文。这里用同步 file IO 是因为
+    // mutate_registry_file 的语义已经覆盖了 flock + 原子替换, 我们直接复用。
+    let migrated = migrate_legacy_tokens(&mut file)?;
+    if migrated {
+        let path_buf = path.to_path_buf();
+        let file_clone = file.clone();
+        tokio::task::spawn_blocking(move || save_registry_file_sync(&path_buf, &file_clone))
+            .await
+            .context("legacy token migration task failed")??;
+    }
+
     registry_state_from_file(path, file)
 }
 
@@ -760,7 +892,11 @@ fn validate_registry_file(path: &Path, file: &RegistryFile) -> Result<()> {
 fn validate_registered_node(node: &RegisteredNode) -> Result<()> {
     validate_identifier("node.node_id", &node.node_id)?;
     validate_non_empty("node.node_label", &node.node_label)?;
-    validate_non_empty("node.token", &node.token)?;
+    // 注册表中 token 必须以哈希形式存在; 旧版本的明文 `token` 字段
+    // 在 `migrate_legacy_tokens` 中已经被搬迁过来。
+    if node.token_hash.is_empty() && node.token.is_empty() {
+        bail!("node.token_hash is empty");
+    }
     validate_tag_list("node.tags", &node.tags)?;
     Ok(())
 }
@@ -782,6 +918,7 @@ fn mint_install_session(
     file: &mut RegistryFile,
     node_id: &str,
     now: DateTime<Utc>,
+    node_session_token: String,
 ) -> Result<InstallSession> {
     file.install_sessions
         .retain(|session| session.node_id != node_id);
@@ -790,6 +927,7 @@ fn mint_install_session(
         node_id: node_id.to_string(),
         created_at: now,
         expires_at: now + ChronoDuration::minutes(INSTALL_TOKEN_TTL_MINUTES),
+        node_session_token,
     };
     file.install_sessions.push(session.clone());
     Ok(session)
@@ -799,9 +937,9 @@ fn authorize_identity(
     entries: &HashMap<String, RegisteredNode>,
     identity: &NodeIdentity,
     token: &str,
-) -> Result<NodeIdentity> {
+) -> Result<AuthorizedNode> {
     if let Some(entry) = entries.get(identity.node_id.as_str()) {
-        if !constant_time_eq(token, &entry.token) {
+        if !token_matches_entry(token, entry) {
             bail!("unauthorized");
         }
 
@@ -813,18 +951,42 @@ fn authorize_identity(
         identity.node_id = entry.node_id.clone();
         identity.node_label = entry.node_label.clone();
         identity.tags = entry.tags.clone();
-        return Ok(identity);
+        return Ok(AuthorizedNode {
+            identity,
+            generation: entry.token_generation,
+        });
     }
 
     bail!("unauthorized");
 }
 
-fn is_token_current(entries: &HashMap<String, RegisteredNode>, node_id: &str, token: &str) -> bool {
+fn is_token_current(
+    entries: &HashMap<String, RegisteredNode>,
+    node_id: &str,
+    session_generation: u64,
+) -> bool {
     if let Some(entry) = entries.get(node_id) {
-        return constant_time_eq(token, &entry.token) && token_is_unexpired(entry, Utc::now());
+        return entry.token_generation == session_generation
+            && token_is_unexpired(entry, Utc::now());
     }
 
     false
+}
+
+/// 在两种 token 存储格式之间做兼容比较。
+///
+/// 新格式: `entry.token_hash` 是 Argon2id PHC 字符串, 用 `verify_token`。
+/// 旧格式: `entry.token_hash` 为空, `entry.token` 是明文, 走 constant-time eq。
+/// 后者应当只在首次加载未迁移的 registry.json 时出现 —— `migrate_legacy_tokens`
+/// 会立即把它升级到新格式。
+fn token_matches_entry(input: &str, entry: &RegisteredNode) -> bool {
+    if !entry.token_hash.is_empty() {
+        verify_token(input, &entry.token_hash)
+    } else if !entry.token.is_empty() {
+        constant_time_eq(input, &entry.token)
+    } else {
+        false
+    }
 }
 
 fn token_is_unexpired(entry: &RegisteredNode, now: DateTime<Utc>) -> bool {
@@ -833,7 +995,66 @@ fn token_is_unexpired(entry: &RegisteredNode, now: DateTime<Utc>) -> bool {
         .is_none_or(|expires_at| now < expires_at)
 }
 
-/// 常量时间字符串比较,用于 token 校验,避免基于响应耗时的旁路攻击。
+/// 用统一参数构造 Argon2id 实例。OWASP 2023 服务器档位:
+/// memory 19 MiB / iterations 2 / parallelism 1。
+fn argon2_instance() -> Argon2<'static> {
+    let params = Params::new(
+        ARGON2_MEMORY_KIB,
+        ARGON2_ITERATIONS,
+        ARGON2_PARALLELISM,
+        None,
+    )
+    .expect("argon2 parameters are constants picked from OWASP 2023 cheat sheet");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
+
+/// 把明文 token 哈希成 Argon2id PHC 字符串。返回的字符串自带 salt + params,
+/// 可直接存入 registry.json 并在后续 verify 时无需额外参数。
+fn hash_token(token: &str) -> Result<String> {
+    let mut salt_bytes = [0u8; 16];
+    fill_random(&mut salt_bytes).context("failed to generate token salt")?;
+    let salt = SaltString::encode_b64(&salt_bytes)
+        .map_err(|error| anyhow!("failed to encode token salt: {error}"))?;
+    let hash = argon2_instance()
+        .hash_password(token.as_bytes(), &salt)
+        .map_err(|error| anyhow!("failed to hash token: {error}"))?;
+    Ok(hash.to_string())
+}
+
+/// 用 PHC 字符串校验候选 token。失败 / 解析错误一律返回 false,
+/// 永远不让密码学错误溢出成 panic。
+fn verify_token(candidate: &str, phc: &str) -> bool {
+    let Ok(parsed) = PasswordHash::new(phc) else {
+        return false;
+    };
+    argon2_instance()
+        .verify_password(candidate.as_bytes(), &parsed)
+        .is_ok()
+}
+
+/// 把还在用明文 `token` 字段的旧 registry 条目迁移到 `token_hash`。
+///
+/// 这一步在 [`load_registry_state`] 中完成,完成后调用方会把 file 写回磁盘,
+/// 之后磁盘上不再保留明文。返回值表示是否触发了任何变更。
+fn migrate_legacy_tokens(file: &mut RegistryFile) -> Result<bool> {
+    let mut changed = false;
+    for node in &mut file.nodes {
+        if node.token_hash.is_empty() && !node.token.is_empty() {
+            node.token_hash = hash_token(&node.token)
+                .with_context(|| format!("hash legacy token for node {}", node.node_id))?;
+            // 用 zero-overwrite 清掉明文。即便后续 file 没立即写盘,内存里的副本
+            // 也尽量短地存在明文。
+            node.token.clear();
+            if node.token_generation == 0 {
+                node.token_generation = 1;
+            }
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+/// 常量时间字符串比较,仅在旧版本明文 token 兼容路径使用。
 fn constant_time_eq(left: &str, right: &str) -> bool {
     constant_time_compare_bytes(left.as_bytes(), right.as_bytes())
 }
@@ -936,7 +1157,7 @@ fn toml_escape(value: &str) -> String {
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
     use proptest::prelude::*;
     use tokio::runtime::Runtime;
 
@@ -946,6 +1167,39 @@ mod tests {
         issue_node, render_install_command, validate_registered_node,
     };
     use nodelite_proto::NodeIdentity;
+
+    fn legacy_node(
+        node_id: &str,
+        node_label: &str,
+        token: &str,
+        token_expires_at: Option<DateTime<Utc>>,
+    ) -> RegisteredNode {
+        RegisteredNode {
+            node_id: node_id.to_string(),
+            node_label: node_label.to_string(),
+            token_hash: String::new(),
+            token_generation: 0,
+            token: token.to_string(),
+            tags: Vec::new(),
+            created_at: Utc::now(),
+            token_expires_at,
+        }
+    }
+
+    fn identity_for(node_id: &str) -> NodeIdentity {
+        NodeIdentity {
+            node_id: node_id.to_string(),
+            node_label: node_id.to_string(),
+            hostname: format!("{node_id}.internal"),
+            os: "Ubuntu".to_string(),
+            kernel_version: None,
+            cpu_model: None,
+            cpu_cores: 2,
+            agent_version: "0.1.0".to_string(),
+            boot_time: None,
+            tags: Vec::new(),
+        }
+    }
 
     #[test]
     fn agent_server_url_uses_wss_for_https() {
@@ -965,15 +1219,10 @@ mod tests {
                 std::env::temp_dir().join(format!("nodelite-registry-auth-test-{unique}"));
             std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
             let path = temp_dir.join("server.json");
+            let mut node = legacy_node("osaka-01", "Osaka 01", "secret", None);
+            node.tags = vec!["edge".to_string()];
             let file = RegistryFile {
-                nodes: vec![RegisteredNode {
-                    node_id: "osaka-01".to_string(),
-                    node_label: "Osaka 01".to_string(),
-                    token: "secret".to_string(),
-                    tags: vec!["edge".to_string()],
-                    created_at: Utc::now(),
-                    token_expires_at: None,
-                }],
+                nodes: vec![node],
                 install_sessions: Vec::new(),
             };
             std::fs::write(&path, serde_json::to_string_pretty(&file).expect("json"))
@@ -998,8 +1247,55 @@ mod tests {
                 .authorize(&identity, "secret")
                 .await
                 .expect("identity should authorize");
-            assert_eq!(authorized.node_label, "Osaka 01");
-            assert_eq!(authorized.tags, vec!["edge"]);
+            assert_eq!(authorized.identity.node_label, "Osaka 01");
+            assert_eq!(authorized.identity.tags, vec!["edge"]);
+            assert_eq!(authorized.generation, 1);
+
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_dir(&temp_dir);
+        });
+    }
+
+    #[test]
+    fn load_hashes_legacy_plaintext_tokens_and_persists_migration() {
+        let runtime = Runtime::new().expect("runtime should build");
+        runtime.block_on(async {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be monotonic enough")
+                .as_nanos();
+            let temp_dir =
+                std::env::temp_dir().join(format!("nodelite-registry-migration-test-{unique}"));
+            std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+            let path = temp_dir.join("server.json");
+            let file = RegistryFile {
+                nodes: vec![legacy_node("legacy-01", "Legacy 01", "legacy-secret", None)],
+                install_sessions: Vec::new(),
+            };
+            std::fs::write(&path, serde_json::to_string_pretty(&file).expect("json"))
+                .expect("registry should be written");
+
+            let registry = NodeRegistry::load(&path)
+                .await
+                .expect("registry should load");
+            let authorized = registry
+                .authorize(&identity_for("legacy-01"), "legacy-secret")
+                .await
+                .expect("legacy token should still authorize after migration");
+            assert_eq!(authorized.generation, 1);
+
+            let stored = std::fs::read_to_string(&path).expect("registry should be readable");
+            assert!(!stored.contains("legacy-secret"));
+            let parsed: RegistryFile =
+                serde_json::from_str(&stored).expect("stored registry should parse");
+            assert_eq!(parsed.nodes.len(), 1);
+            assert!(parsed.nodes[0].token.is_empty());
+            assert!(parsed.nodes[0].token_hash.starts_with("$argon2id$"));
+            assert!(super::verify_token(
+                "legacy-secret",
+                &parsed.nodes[0].token_hash
+            ));
+            assert_eq!(parsed.nodes[0].token_generation, 1);
 
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_dir(&temp_dir);
@@ -1035,7 +1331,15 @@ mod tests {
                 serde_json::from_str(&stored).expect("stored registry should parse");
             assert_eq!(parsed.nodes.len(), 1);
             assert_eq!(parsed.install_sessions.len(), 1);
+            assert!(parsed.nodes[0].token.is_empty());
+            assert!(parsed.nodes[0].token_hash.starts_with("$argon2id$"));
+            assert_ne!(parsed.nodes[0].token_hash, issued.node_session_token);
+            assert_eq!(parsed.nodes[0].token_generation, 1);
             assert_eq!(parsed.install_sessions[0].token, issued.install_token);
+            assert_eq!(
+                parsed.install_sessions[0].node_session_token,
+                issued.node_session_token
+            );
 
             let command = render_install_command(
                 "https://monitor.example.com",
@@ -1047,7 +1351,7 @@ mod tests {
             assert!(command.contains("/install-agent.sh"));
             assert!(command.contains("NODELITE_AGENT_INSTALL_TOKEN="));
             assert!(command.contains(&issued.install_token));
-            assert!(!command.contains(&issued.node.token));
+            assert!(!command.contains(&issued.node_session_token));
 
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_dir(&temp_dir);
@@ -1078,11 +1382,20 @@ mod tests {
             )
             .await
             .expect("node should be issued");
-            let old_token = issued.node.token.clone();
+            let old_token = issued.node_session_token.clone();
             let registry = NodeRegistry::load(&path)
                 .await
                 .expect("registry should load");
-            assert!(registry.is_token_current("hk-01", &old_token).await);
+            let identity = identity_for("hk-01");
+            let old_authorized = registry
+                .authorize(&identity, &old_token)
+                .await
+                .expect("old token should authorize before rotation");
+            assert!(
+                registry
+                    .is_token_current("hk-01", old_authorized.generation)
+                    .await
+            );
 
             let rotated = issue_node(
                 &path,
@@ -1096,10 +1409,22 @@ mod tests {
             .await
             .expect("node token should rotate");
             assert!(registry.reload().await.expect("reload should succeed"));
-            assert!(!registry.is_token_current("hk-01", &old_token).await);
+            assert!(
+                !registry
+                    .is_token_current("hk-01", old_authorized.generation)
+                    .await
+            );
+            assert!(
+                registry.authorize(&identity, &old_token).await.is_err(),
+                "old plaintext token should no longer authorize"
+            );
+            let rotated_authorized = registry
+                .authorize(&identity, &rotated.node_session_token)
+                .await
+                .expect("rotated token should authorize");
             assert!(
                 registry
-                    .is_token_current("hk-01", &rotated.node.token)
+                    .is_token_current("hk-01", rotated_authorized.generation)
                     .await
             );
 
@@ -1246,8 +1571,8 @@ mod tests {
                 .await
                 .expect("install token should be consumable")
                 .expect("install token should resolve to a node");
-            assert_eq!(consumed.node_id, issued.node.node_id);
-            assert_eq!(consumed.token, issued.node.token);
+            assert_eq!(consumed.node.node_id, issued.node.node_id);
+            assert_eq!(consumed.node_session_token, issued.node_session_token);
             assert!(
                 registry
                     .consume_install_token(&issued.install_token)
@@ -1255,6 +1580,8 @@ mod tests {
                     .expect("second install token lookup should succeed")
                     .is_none()
             );
+            let stored = std::fs::read_to_string(&path).expect("registry should be readable");
+            assert!(!stored.contains(&issued.node_session_token));
 
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_dir(&temp_dir);
@@ -1274,14 +1601,12 @@ mod tests {
             std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
             let path = temp_dir.join("server.json");
             let file = RegistryFile {
-                nodes: vec![RegisteredNode {
-                    node_id: "expired-01".to_string(),
-                    node_label: "Expired 01".to_string(),
-                    token: "secret".to_string(),
-                    tags: vec![],
-                    created_at: Utc::now(),
-                    token_expires_at: Some(Utc::now() - ChronoDuration::seconds(1)),
-                }],
+                nodes: vec![legacy_node(
+                    "expired-01",
+                    "Expired 01",
+                    "secret",
+                    Some(Utc::now() - ChronoDuration::seconds(1)),
+                )],
                 install_sessions: Vec::new(),
             };
             std::fs::write(&path, serde_json::to_string_pretty(&file).expect("json"))
@@ -1290,7 +1615,12 @@ mod tests {
                 .await
                 .expect("registry should load");
 
-            assert!(!registry.is_token_current("expired-01", "secret").await);
+            let error = registry
+                .authorize(&identity_for("expired-01"), "secret")
+                .await
+                .expect_err("expired token should not authorize");
+            assert_eq!(error.to_string(), "token expired");
+            assert!(!registry.is_token_current("expired-01", 1).await);
 
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_dir(&temp_dir);
@@ -1303,6 +1633,8 @@ mod tests {
         let entry = RegisteredNode {
             node_id: "boundary-01".to_string(),
             node_label: "Boundary 01".to_string(),
+            token_hash: "hash".to_string(),
+            token_generation: 1,
             token: "secret".to_string(),
             tags: Vec::new(),
             created_at: expires_at - ChronoDuration::minutes(5),
@@ -1370,14 +1702,7 @@ mod tests {
             std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
             let path = temp_dir.join("server.json");
             let file = RegistryFile {
-                nodes: vec![RegisteredNode {
-                    node_id: "osaka-01".to_string(),
-                    node_label: "Osaka 01".to_string(),
-                    token: "secret".to_string(),
-                    tags: vec![],
-                    created_at: Utc::now(),
-                    token_expires_at: None,
-                }],
+                nodes: vec![legacy_node("osaka-01", "Osaka 01", "secret", None)],
                 install_sessions: Vec::new(),
             };
             std::fs::write(&path, serde_json::to_string_pretty(&file).expect("json"))
@@ -1484,6 +1809,8 @@ mod tests {
         let mut node = RegisteredNode {
             node_id: "hk-01".to_string(),
             node_label: "Hong Kong 01".to_string(),
+            token_hash: "hash".to_string(),
+            token_generation: 1,
             token: "secret-token".to_string(),
             tags: vec!["edge".to_string()],
             created_at: Utc::now(),

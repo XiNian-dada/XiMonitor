@@ -11,6 +11,7 @@ repository = "https://github.com/XiNian-dada/NodeLite"
 
 [workspace.dependencies]
 anyhow = "1.0"
+argon2 = "0.5"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }

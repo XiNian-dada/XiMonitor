@@ -58,7 +58,11 @@ struct IssuedNodeBundle {
 pub(crate) async fn issue_node_command(config_path: &Path, args: NodeCommandArgs) -> Result<()> {
     let config = load_server_config(config_path).await?;
     let bundle = issue_node_bundle(&config, &args).await?;
-    let agent_config = render_agent_config(&config.public_base_url, &bundle.issued.node)?;
+    let agent_config = render_agent_config(
+        &config.public_base_url,
+        &bundle.issued.node,
+        &bundle.issued.node_session_token,
+    )?;
     let action = if bundle.issued.created {
         "created"
     } else if bundle.issued.rotated_token {

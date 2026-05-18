@@ -402,8 +402,8 @@ pub(crate) async fn install_bootstrap(
         return install_unauthorized_response("invalid install token");
     }
 
-    let node = match state.registry.consume_install_token(token).await {
-        Ok(Some(node)) => node,
+    let consumed = match state.registry.consume_install_token(token).await {
+        Ok(Some(consumed)) => consumed,
         Ok(None) => {
             state.install_admission.record_auth_failure(client_ip);
             return install_unauthorized_response("invalid install token");
@@ -426,7 +426,11 @@ pub(crate) async fn install_bootstrap(
     // 失败计数误伤。
     state.install_admission.clear_auth_failures(client_ip);
 
-    match render_agent_config(&state.shared.config().public_base_url, &node) {
+    match render_agent_config(
+        &state.shared.config().public_base_url,
+        &consumed.node,
+        &consumed.node_session_token,
+    ) {
         Ok(agent_config) => (
             [
                 (header::CONTENT_TYPE, "application/toml; charset=utf-8"),
