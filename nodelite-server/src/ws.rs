@@ -15,7 +15,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
 use axum::extract::{ConnectInfo, State, WebSocketUpgrade};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
@@ -109,23 +109,32 @@ async fn handle_socket(
     mut socket: WebSocket,
 ) -> Result<(), ProtocolError> {
     let shared = state.shared.clone();
-    let hello = match tokio::time::timeout(
-        Duration::from_secs(HELLO_TIMEOUT_SECS),
-        recv_hello(&mut socket),
-    )
-    .await
-    {
-        Ok(Ok(hello)) => hello,
-        Ok(Err(error)) => {
-            state.ws_admission.record_auth_failure(client_ip);
-            return Err(error);
+    let shutdown = state.shutdown.clone();
+
+    // 处于"等 hello"阶段时也要响应进程级关停:握手未完成的连接如果不在这里
+    // 主动断开,后续 axum graceful shutdown 期间它们会拖住整个进程退出。
+    let hello = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => {
+            let _ = send_close_frame(&mut socket, close_code::AWAY, "server shutting down").await;
+            return Ok(());
         }
-        Err(_) => {
-            state.ws_admission.record_auth_failure(client_ip);
-            return Err(ProtocolError::Client(
-                "timed out waiting for hello message".to_string(),
-            ));
-        }
+        outcome = tokio::time::timeout(
+            Duration::from_secs(HELLO_TIMEOUT_SECS),
+            recv_hello(&mut socket),
+        ) => match outcome {
+            Ok(Ok(hello)) => hello,
+            Ok(Err(error)) => {
+                state.ws_admission.record_auth_failure(client_ip);
+                return Err(error);
+            }
+            Err(_) => {
+                state.ws_admission.record_auth_failure(client_ip);
+                return Err(ProtocolError::Client(
+                    "timed out waiting for hello message".to_string(),
+                ));
+            }
+        },
     };
     if hello.protocol_version != WIRE_PROTOCOL_VERSION {
         state.ws_admission.record_auth_failure(client_ip);
@@ -216,6 +225,17 @@ async fn handle_socket(
 
         loop {
             tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {
+                    info!(node_id = %node_id, session_id, "closing websocket session due to server shutdown");
+                    let _ = sender
+                        .send(Message::Close(Some(CloseFrame {
+                            code: close_code::AWAY,
+                            reason: "server shutting down".into(),
+                        })))
+                        .await;
+                    break Ok(());
+                }
                 incoming = receiver.next() => {
                     let Some(frame) = incoming else {
                         break Ok(());
@@ -528,6 +548,23 @@ async fn send_wire_message(
         .send(Message::Text(payload.into()))
         .await
         .map_err(|error| anyhow!("failed to send websocket message: {error}"))?;
+    Ok(())
+}
+
+/// 主动断开未完成握手的连接:给客户端一个明确的 close code,
+/// 而不是直接 drop socket(会被 agent 当成网络异常并立即重连)。
+async fn send_close_frame(
+    socket: &mut WebSocket,
+    code: u16,
+    reason: &'static str,
+) -> Result<(), anyhow::Error> {
+    socket
+        .send(Message::Close(Some(CloseFrame {
+            code,
+            reason: reason.into(),
+        })))
+        .await
+        .map_err(|error| anyhow!("failed to send close frame: {error}"))?;
     Ok(())
 }
 
