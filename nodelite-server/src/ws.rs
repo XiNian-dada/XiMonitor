@@ -268,13 +268,6 @@ async fn run_authenticated_session(
     socket: WebSocket,
     session: &mut ActiveSession,
 ) -> Result<(), ProtocolError> {
-    let notice = WireMessage::ServerNotice(ServerNoticeMessage {
-        level: nodelite_proto::NoticeLevel::Info,
-        message: "authenticated".to_string(),
-    });
-    let mut socket = socket;
-    send_wire_message(&mut socket, &notice).await?;
-
     let shared = state.shared.clone();
     let (mut sender, mut receiver) = socket.split();
     let (session_control_tx, mut session_control_rx) = mpsc::unbounded_channel();
@@ -289,6 +282,17 @@ async fn run_authenticated_session(
         );
         return Ok(());
     }
+
+    let notice = WireMessage::ServerNotice(ServerNoticeMessage {
+        level: nodelite_proto::NoticeLevel::Info,
+        message: "authenticated".to_string(),
+    });
+    let payload = serde_json::to_string(&notice)
+        .map_err(|error| anyhow!("failed to serialize authenticated notice: {error}"))?;
+    sender
+        .send(Message::Text(payload.into()))
+        .await
+        .map_err(|error| anyhow!("failed to send authenticated notice: {error}"))?;
 
     let mut loop_state = SessionLoopState::new(shared.config().ping_interval_secs);
     loop {
