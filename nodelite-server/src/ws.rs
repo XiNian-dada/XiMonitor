@@ -67,6 +67,43 @@ enum ParsedFrame {
     Close,
 }
 
+struct ActiveSession {
+    node_id: String,
+    node_label: String,
+    session_id: u64,
+    session_token: String,
+    session_generation: u64,
+}
+
+struct SessionLoopState {
+    ping_ticker: tokio::time::Interval,
+    ping_expiry: Duration,
+    outstanding_pings: HashMap<u64, Instant>,
+    next_ping_nonce: u64,
+    metric_anomaly_window: VecDeque<Instant>,
+}
+
+impl SessionLoopState {
+    fn new(ping_interval_secs: u64) -> Self {
+        let ping_every = Duration::from_secs(ping_interval_secs);
+        let ping_expiry = Duration::from_secs(ping_interval_secs.saturating_mul(3));
+        let mut ping_ticker = interval(ping_every);
+        ping_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        Self {
+            ping_ticker,
+            ping_expiry,
+            outstanding_pings: HashMap::new(),
+            next_ping_nonce: 1,
+            metric_anomaly_window: VecDeque::new(),
+        }
+    }
+}
+
+enum LoopAction {
+    Continue,
+    Break,
+}
+
 /// `/ws` 入口:在 WebSocket 升级前先做准入检查与帧大小限制。
 pub async fn ws_handler(
     State(state): State<AppState>,
@@ -105,34 +142,74 @@ async fn handle_socket(
     mut socket: WebSocket,
 ) -> Result<(), ProtocolError> {
     let shared = state.shared.clone();
+    let hello = wait_for_hello_message(&state, client_ip, &mut socket).await?;
+    let authorized = authorize_hello(&state, client_ip, &mut socket, &hello).await?;
+    let identity = authorized.identity;
+    let mut session = ActiveSession {
+        node_id: identity.node_id.clone(),
+        node_label: identity.node_label.clone(),
+        session_id: shared
+            .register_node(identity, Some(client_ip.to_string()))
+            .await,
+        session_token: hello.token,
+        session_generation: authorized.generation,
+    };
+
+    info!(
+        node_id = %session.node_id,
+        node_label = %session.node_label,
+        session_id = session.session_id,
+        "node authenticated"
+    );
+
+    let session_result = run_authenticated_session(&state, socket, &mut session).await;
+    shared
+        .mark_disconnected(&session.node_id, session.session_id)
+        .await;
+    info!(node_id = %session.node_id, session_id = session.session_id, "node disconnected");
+    session_result
+}
+
+async fn wait_for_hello_message(
+    state: &AppState,
+    client_ip: IpAddr,
+    socket: &mut WebSocket,
+) -> Result<HelloMessage, ProtocolError> {
+    let shared = state.shared.clone();
     let hello_timeout_secs = shared.config().hello_timeout_secs;
     let shutdown = state.shutdown.clone();
 
-    // 处于"等 hello"阶段时也要响应进程级关停:握手未完成的连接如果不在这里
-    // 主动断开,后续 axum graceful shutdown 期间它们会拖住整个进程退出。
-    let hello = tokio::select! {
+    tokio::select! {
         biased;
         _ = shutdown.cancelled() => {
-            let _ = send_close_frame(&mut socket, close_code::AWAY, "server shutting down").await;
-            return Ok(());
+            let _ = send_close_frame(socket, close_code::AWAY, "server shutting down").await;
+            Err(ProtocolError::Client("server shutting down".to_string()))
         }
         outcome = tokio::time::timeout(
             Duration::from_secs(hello_timeout_secs),
-            recv_hello(&mut socket),
+            recv_hello(socket),
         ) => match outcome {
-            Ok(Ok(hello)) => hello,
+            Ok(Ok(hello)) => Ok(hello),
             Ok(Err(error)) => {
                 state.ws_admission.record_auth_failure(client_ip);
-                return Err(error);
+                Err(error)
             }
             Err(_) => {
                 state.ws_admission.record_auth_failure(client_ip);
-                return Err(ProtocolError::Client(
+                Err(ProtocolError::Client(
                     "timed out waiting for hello message".to_string(),
-                ));
+                ))
             }
         },
-    };
+    }
+}
+
+async fn authorize_hello(
+    state: &AppState,
+    client_ip: IpAddr,
+    socket: &mut WebSocket,
+    hello: &HelloMessage,
+) -> Result<crate::registry::AuthorizedNode, ProtocolError> {
     if hello.protocol_version != WIRE_PROTOCOL_VERSION {
         state.ws_admission.record_auth_failure(client_ip);
         let notice = WireMessage::ServerNotice(ServerNoticeMessage {
@@ -142,19 +219,22 @@ async fn handle_socket(
                 hello.protocol_version, WIRE_PROTOCOL_VERSION
             ),
         });
-        let _ = send_wire_message(&mut socket, &notice).await;
+        let _ = send_wire_message(socket, &notice).await;
         return Err(ProtocolError::Client(format!(
             "unsupported protocol version {}; expected {}",
             hello.protocol_version, WIRE_PROTOCOL_VERSION
         )));
     }
-    let mut session_token = hello.token.clone();
-    let authorized = match state
+
+    match state
         .registry
-        .authorize(&hello.identity, &session_token)
+        .authorize(&hello.identity, &hello.token)
         .await
     {
-        Ok(authorized) => authorized,
+        Ok(authorized) => {
+            state.ws_admission.clear_auth_failures(client_ip);
+            Ok(authorized)
+        }
         Err(error) => {
             warn!(
                 client_ip = %client_ip,
@@ -163,10 +243,6 @@ async fn handle_socket(
                 "websocket authentication rejected",
             );
             state.ws_admission.record_auth_failure(client_ip);
-
-            // 拒绝前先通过 ServerNotice 告知 Agent 失败原因,使 Agent 端日志
-            // 与运维报警能直接区分"token 过期需要重新颁发"与"通用拒绝"。
-            // 发送失败不影响后续关闭逻辑;只是 best-effort 的诊断信息。
             let error_msg = error.to_string();
             let (notice_message, error_label): (&str, &str) = if error_msg.contains("token expired")
             {
@@ -181,272 +257,412 @@ async fn handle_socket(
                 level: nodelite_proto::NoticeLevel::Error,
                 message: notice_message.to_string(),
             });
-            let _ = send_wire_message(&mut socket, &notice).await;
-            return Err(ProtocolError::Client(error_label.to_string()));
+            let _ = send_wire_message(socket, &notice).await;
+            Err(ProtocolError::Client(error_label.to_string()))
         }
-    };
-    state.ws_admission.clear_auth_failures(client_ip);
+    }
+}
 
-    let identity = authorized.identity;
-    // 捕获 hello 时刻的 token 代次; 之后所有 `is_token_current` 调用都比对这个值,
-    // 一旦操作员轮换 token, 代次就会 +1, 当前会话会被立刻断开。
-    let mut session_generation = authorized.generation;
-    let node_id = identity.node_id.clone();
-    let node_label = identity.node_label.clone();
-    let session_id = shared
-        .register_node(identity, Some(client_ip.to_string()))
-        .await;
+async fn run_authenticated_session(
+    state: &AppState,
+    socket: WebSocket,
+    session: &mut ActiveSession,
+) -> Result<(), ProtocolError> {
+    let notice = WireMessage::ServerNotice(ServerNoticeMessage {
+        level: nodelite_proto::NoticeLevel::Info,
+        message: "authenticated".to_string(),
+    });
+    let mut socket = socket;
+    send_wire_message(&mut socket, &notice).await?;
 
-    info!(node_id = %node_id, node_label = %node_label, session_id, "node authenticated");
+    let shared = state.shared.clone();
+    let (mut sender, mut receiver) = socket.split();
+    let (session_control_tx, mut session_control_rx) = mpsc::unbounded_channel();
+    if !shared
+        .attach_session_control(&session.node_id, session.session_id, session_control_tx)
+        .await
+    {
+        warn!(
+            node_id = %session.node_id,
+            session_id = session.session_id,
+            "failed to attach control channel for superseded session"
+        );
+        return Ok(());
+    }
 
-    let session_result: Result<(), ProtocolError> = async {
-        let notice = WireMessage::ServerNotice(ServerNoticeMessage {
-            level: nodelite_proto::NoticeLevel::Info,
-            message: "authenticated".to_string(),
-        });
-        send_wire_message(&mut socket, &notice).await?;
-
-        let (mut sender, mut receiver) = socket.split();
-        let (session_control_tx, mut session_control_rx) = mpsc::unbounded_channel();
-        if !shared
-            .attach_session_control(&node_id, session_id, session_control_tx)
-            .await
-        {
-            warn!(node_id = %node_id, session_id, "failed to attach control channel for superseded session");
-            return Ok(());
-        }
-        let ping_every = Duration::from_secs(shared.config().ping_interval_secs);
-        let ping_expiry = Duration::from_secs(shared.config().ping_interval_secs.saturating_mul(3));
-        let mut ping_ticker = interval(ping_every);
-        // 会话挂起/恢复后不要"补打"积压的 tick,否则会瞬间灌满 outstanding_pings。
-        ping_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut outstanding_pings: HashMap<u64, Instant> = HashMap::new();
-        let mut next_ping_nonce = 1_u64;
-        let mut metric_anomaly_window: VecDeque<Instant> = VecDeque::new();
-
-        loop {
-            tokio::select! {
-                biased;
-                _ = shutdown.cancelled() => {
-                    info!(node_id = %node_id, session_id, "closing websocket session due to server shutdown");
-                    let _ = sender
-                        .send(Message::Close(Some(CloseFrame {
-                            code: close_code::AWAY,
-                            reason: "server shutting down".into(),
-                        })))
-                        .await;
-                    break Ok(());
+    let mut loop_state = SessionLoopState::new(shared.config().ping_interval_secs);
+    loop {
+        tokio::select! {
+            biased;
+            _ = state.shutdown.cancelled() => {
+                info!(node_id = %session.node_id, session_id = session.session_id, "closing websocket session due to server shutdown");
+                let _ = sender
+                    .send(Message::Close(Some(CloseFrame {
+                        code: close_code::AWAY,
+                        reason: "server shutting down".into(),
+                    })))
+                    .await;
+                return Ok(());
+            }
+            incoming = receiver.next() => {
+                let Some(frame) = incoming else {
+                    return Ok(());
+                };
+                let frame = frame.map_err(|error| anyhow!("websocket receive failed: {error}"))?;
+                if matches!(
+                    handle_incoming_frame(state, &shared, session, &mut sender, &mut loop_state, frame).await?,
+                    LoopAction::Break
+                ) {
+                    return Ok(());
                 }
-                incoming = receiver.next() => {
-                    let Some(frame) = incoming else {
-                        break Ok(());
-                    };
-                    let frame = frame.map_err(|error| anyhow!("websocket receive failed: {error}"))?;
-
-                    match parse_wire_message(frame)? {
-                        ParsedFrame::Close => break Ok(()),
-                        ParsedFrame::Control => continue,
-                        ParsedFrame::Wire(message) => match *message {
-                            WireMessage::Metrics(MetricsMessage { snapshot }) => {
-                                if !state.registry.is_token_current(&node_id, session_generation).await {
-                                    warn!(node_id = %node_id, "disconnecting session after registry token change");
-                                    break Ok(());
-                                }
-                                let (snapshot, report) = sanitize_snapshot(shared.config(), snapshot);
-                                if report.modified() {
-                                    update_metric_anomaly_window(
-                                        &mut metric_anomaly_window,
-                                        &report,
-                                        Instant::now(),
-                                    );
-                                    warn!(
-                                        node_id = %node_id,
-                                        session_id,
-                                        anomalies = report.total(),
-                                        anomaly_window_size = metric_anomaly_window.len(),
-                                        "agent reported out-of-range metrics; clamped before persistence",
-                                    );
-                                    if should_disconnect_for_metric_anomalies(&metric_anomaly_window) {
-                                        warn!(
-                                            node_id = %node_id,
-                                            session_id,
-                                            limit = METRIC_ANOMALY_SESSION_LIMIT,
-                                            window_secs = METRIC_ANOMALY_WINDOW_SECS,
-                                            "disconnecting session after repeated metric anomalies",
-                                        );
-                                        break Ok(());
-                                    }
-                                }
-                                let Some(status) = shared.update_snapshot(&node_id, session_id, snapshot).await else {
-                                    warn!(node_id = %node_id, session_id, "dropping metrics from superseded session");
-                                    break Ok(());
-                                };
-                                state.history.record_status(&status).await;
-                            }
-                            WireMessage::AgentLogs(AgentLogsMessage { entries }) => {
-                                if !state.registry.is_token_current(&node_id, session_generation).await {
-                                    warn!(node_id = %node_id, "disconnecting session after registry token change");
-                                    break Ok(());
-                                }
-                                let accepted = state.agent_logs.record_entries(&node_id, entries).await;
-                                if accepted > 0 {
-                                    info!(node_id = %node_id, accepted, "recorded agent runtime log entries");
-                                }
-                            }
-                            WireMessage::Pong(PongMessage { nonce }) => {
-                                if !state.registry.is_token_current(&node_id, session_generation).await {
-                                    warn!(node_id = %node_id, "disconnecting session after registry token change");
-                                    break Ok(());
-                                }
-                                let Some(sent_at) = outstanding_pings.remove(&nonce) else {
-                                    continue;
-                                };
-                                let latency_ms = sent_at.elapsed().as_millis() as u64;
-                                if !shared.update_latency(&node_id, session_id, latency_ms).await {
-                                    warn!(node_id = %node_id, session_id, "dropping pong from superseded session");
-                                    break Ok(());
-                                }
-                            }
-                            WireMessage::Hello(_) => {
-                                break Err(ProtocolError::Client("duplicate hello message".to_string()));
-                            }
-                            WireMessage::Ping(_) => {
-                                break Err(ProtocolError::Client("agent must not send ping messages".to_string()));
-                            }
-                            WireMessage::ServerNotice(_) => {
-                                break Err(ProtocolError::Client("agent must not send server_notice messages".to_string()));
-                            }
-                            WireMessage::RefreshTokenRequest(request) => {
-                                if !state.registry.is_token_current(&node_id, session_generation).await {
-                                    warn!(node_id = %node_id, "disconnecting session after token expiry before refresh");
-                                    break Ok(());
-                                }
-                                // `request.node_id` 完全由客户端控制,我们不应该
-                                // 信任它来决定"为谁刷 token"。会话握手期间的认证
-                                // 已经把这条连接绑定到 `node_id`,接下来所有的
-                                // refresh 都只对它生效。字段保留是为了不破坏旧
-                                // Agent 的请求格式;如果客户端发了别的 node_id,
-                                // 那要么是 bug 要么是恶意,但都不会得到非本会话
-                                // 节点的 token。这里 silently ignore + debug 记录
-                                // 即可,而不再像以前那样直接断开连接。
-                                if request.node_id != node_id {
-                                    warn!(
-                                        session_node_id = %node_id,
-                                        client_supplied_node_id = %request.node_id,
-                                        "ignoring client-supplied node_id in refresh_token_request",
-                                    );
-                                }
-                                match state.registry.refresh_token(&node_id).await {
-                                    Ok((new_token, expires_at, new_generation)) => {
-                                        let response = WireMessage::RefreshTokenResponse(
-                                            nodelite_proto::RefreshTokenResponseMessage {
-                                                new_token: new_token.clone(),
-                                                expires_at: expires_at.to_rfc3339(),
-                                            },
-                                        );
-                                        let payload = serde_json::to_string(&response)
-                                            .map_err(|error| anyhow!("failed to serialize refresh response: {error}"))?;
-                                        // 先发送、再替换本地 session_token + generation。理由同
-                                        // `maybe_refresh_agent_token`:send 失败时不能
-                                        // 让 server 进入一个 agent 看不到的新状态。
-                                        sender
-                                            .send(Message::Text(payload.into()))
-                                            .await
-                                            .map_err(|error| anyhow!("failed to send refresh response: {error}"))?;
-                                        session_token = new_token;
-                                        session_generation = new_generation;
-                                        info!(node_id = %node_id, "token refreshed successfully");
-                                    }
-                                    Err(error) => {
-                                        warn!(node_id = %node_id, error = ?error, "failed to refresh token");
-                                        let notice = WireMessage::ServerNotice(ServerNoticeMessage {
-                                            level: nodelite_proto::NoticeLevel::Error,
-                                            message: "Failed to refresh token".to_string(),
-                                        });
-                                        let payload = serde_json::to_string(&notice)
-                                            .map_err(|error| anyhow!("failed to serialize notice: {error}"))?;
-                                        sender
-                                            .send(Message::Text(payload.into()))
-                                            .await
-                                            .map_err(|error| anyhow!("failed to send notice: {error}"))?;
-                                    }
-                                }
-                            }
-                            WireMessage::RefreshTokenResponse(_) => {
-                                break Err(ProtocolError::Client("agent must not send refresh_token_response messages".to_string()));
-                            }
-                        },
-                    }
+            }
+            command = session_control_rx.recv() => {
+                let Some(command) = command else {
+                    return Ok(());
+                };
+                if matches!(
+                    handle_session_command(state, session, &mut sender, command).await?,
+                    LoopAction::Break
+                ) {
+                    return Ok(());
                 }
-                command = session_control_rx.recv() => {
-                    let Some(command) = command else {
-                        break Ok(());
-                    };
-                    match command {
-                        SessionCommand::RefreshToken { response } => {
-                            match refresh_session_token(
-                                &mut sender,
-                                &state.registry,
-                                &node_id,
-                                &mut session_token,
-                                &mut session_generation,
-                                "manual",
-                            )
-                            .await
-                            {
-                                Ok(expires_at) => {
-                                    let _ = response.send(Ok(SessionRefreshReply {
-                                        token_expires_at: expires_at,
-                                    }));
-                                }
-                                Err(error) => {
-                                    let message = error.to_string();
-                                    let _ = response.send(Err(message));
-                                    break Err(ProtocolError::Server(error));
-                                }
-                            }
-                        }
-                    }
-                }
-                _ = ping_ticker.tick() => {
-                    if !shared.is_current_session(&node_id, session_id).await {
-                        warn!(node_id = %node_id, session_id, "closing superseded websocket session");
-                        break Ok(());
-                    }
-                    if !state.registry.is_token_current(&node_id, session_generation).await {
-                        warn!(node_id = %node_id, "closing websocket session after registry token change");
-                        break Ok(());
-                    }
-                    if should_refresh_agent_token(&state.registry, &node_id).await? {
-                        refresh_session_token(
-                            &mut sender,
-                            &state.registry,
-                            &node_id,
-                            &mut session_token,
-                            &mut session_generation,
-                            "pre-expiry",
-                        )
-                        .await?;
-                    }
-
-                    prune_outstanding_pings(&mut outstanding_pings, ping_expiry, shared.config().max_outstanding_pings);
-                    let nonce = next_ping_nonce;
-                    next_ping_nonce = next_ping_nonce.saturating_add(1);
-                    outstanding_pings.insert(nonce, Instant::now());
-                    let ping = encode_ping_message(nonce);
-                    sender
-                        .send(Message::Text(ping.into()))
-                        .await
-                        .map_err(|error| anyhow!("failed to send ping: {error}"))?;
+            }
+            _ = loop_state.ping_ticker.tick() => {
+                if matches!(
+                    handle_ping_tick(state, &shared, session, &mut sender, &mut loop_state).await?,
+                    LoopAction::Break
+                ) {
+                    return Ok(());
                 }
             }
         }
     }
-    .await;
+}
 
-    shared.mark_disconnected(&node_id, session_id).await;
-    info!(node_id = %node_id, session_id, "node disconnected");
-    session_result
+async fn handle_incoming_frame(
+    state: &AppState,
+    shared: &crate::state::SharedState,
+    session: &mut ActiveSession,
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    loop_state: &mut SessionLoopState,
+    frame: Message,
+) -> Result<LoopAction, ProtocolError> {
+    match parse_wire_message(frame)? {
+        ParsedFrame::Close => Ok(LoopAction::Break),
+        ParsedFrame::Control => Ok(LoopAction::Continue),
+        ParsedFrame::Wire(message) => {
+            handle_wire_message(state, shared, session, sender, loop_state, *message).await
+        }
+    }
+}
+
+async fn handle_wire_message(
+    state: &AppState,
+    shared: &crate::state::SharedState,
+    session: &mut ActiveSession,
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    loop_state: &mut SessionLoopState,
+    message: WireMessage,
+) -> Result<LoopAction, ProtocolError> {
+    match message {
+        WireMessage::Metrics(MetricsMessage { snapshot }) => {
+            handle_metrics_message(state, shared, session, loop_state, snapshot).await
+        }
+        WireMessage::AgentLogs(AgentLogsMessage { entries }) => {
+            handle_agent_logs_message(state, session, entries).await
+        }
+        WireMessage::Pong(PongMessage { nonce }) => {
+            handle_pong_message(shared, state, session, loop_state, nonce).await
+        }
+        WireMessage::RefreshTokenRequest(request) => {
+            handle_refresh_request(state, session, sender, request).await
+        }
+        WireMessage::Hello(_) => Err(ProtocolError::Client("duplicate hello message".to_string())),
+        WireMessage::Ping(_) => Err(ProtocolError::Client(
+            "agent must not send ping messages".to_string(),
+        )),
+        WireMessage::ServerNotice(_) => Err(ProtocolError::Client(
+            "agent must not send server_notice messages".to_string(),
+        )),
+        WireMessage::RefreshTokenResponse(_) => Err(ProtocolError::Client(
+            "agent must not send refresh_token_response messages".to_string(),
+        )),
+    }
+}
+
+async fn handle_metrics_message(
+    state: &AppState,
+    shared: &crate::state::SharedState,
+    session: &ActiveSession,
+    loop_state: &mut SessionLoopState,
+    snapshot: nodelite_proto::NodeSnapshot,
+) -> Result<LoopAction, ProtocolError> {
+    if !ensure_current_token(
+        state,
+        session,
+        "disconnecting session after registry token change",
+    )
+    .await
+    {
+        return Ok(LoopAction::Break);
+    }
+    let (snapshot, report) = sanitize_snapshot(shared.config(), snapshot);
+    if report.modified() {
+        update_metric_anomaly_window(
+            &mut loop_state.metric_anomaly_window,
+            &report,
+            Instant::now(),
+        );
+        warn!(
+            node_id = %session.node_id,
+            session_id = session.session_id,
+            anomalies = report.total(),
+            anomaly_window_size = loop_state.metric_anomaly_window.len(),
+            "agent reported out-of-range metrics; clamped before persistence",
+        );
+        if should_disconnect_for_metric_anomalies(&loop_state.metric_anomaly_window) {
+            warn!(
+                node_id = %session.node_id,
+                session_id = session.session_id,
+                limit = METRIC_ANOMALY_SESSION_LIMIT,
+                window_secs = METRIC_ANOMALY_WINDOW_SECS,
+                "disconnecting session after repeated metric anomalies",
+            );
+            return Ok(LoopAction::Break);
+        }
+    }
+    let Some(status) = shared
+        .update_snapshot(&session.node_id, session.session_id, snapshot)
+        .await
+    else {
+        warn!(
+            node_id = %session.node_id,
+            session_id = session.session_id,
+            "dropping metrics from superseded session"
+        );
+        return Ok(LoopAction::Break);
+    };
+    state.history.record_status(&status).await;
+    Ok(LoopAction::Continue)
+}
+
+async fn handle_agent_logs_message(
+    state: &AppState,
+    session: &ActiveSession,
+    entries: Vec<nodelite_proto::AgentLogEntry>,
+) -> Result<LoopAction, ProtocolError> {
+    if !ensure_current_token(
+        state,
+        session,
+        "disconnecting session after registry token change",
+    )
+    .await
+    {
+        return Ok(LoopAction::Break);
+    }
+    let accepted = state
+        .agent_logs
+        .record_entries(&session.node_id, entries)
+        .await;
+    if accepted > 0 {
+        info!(node_id = %session.node_id, accepted, "recorded agent runtime log entries");
+    }
+    Ok(LoopAction::Continue)
+}
+
+async fn handle_pong_message(
+    shared: &crate::state::SharedState,
+    state: &AppState,
+    session: &ActiveSession,
+    loop_state: &mut SessionLoopState,
+    nonce: u64,
+) -> Result<LoopAction, ProtocolError> {
+    if !ensure_current_token(
+        state,
+        session,
+        "disconnecting session after registry token change",
+    )
+    .await
+    {
+        return Ok(LoopAction::Break);
+    }
+    let Some(sent_at) = loop_state.outstanding_pings.remove(&nonce) else {
+        return Ok(LoopAction::Continue);
+    };
+    let latency_ms = sent_at.elapsed().as_millis() as u64;
+    if !shared
+        .update_latency(&session.node_id, session.session_id, latency_ms)
+        .await
+    {
+        warn!(
+            node_id = %session.node_id,
+            session_id = session.session_id,
+            "dropping pong from superseded session"
+        );
+        return Ok(LoopAction::Break);
+    }
+    Ok(LoopAction::Continue)
+}
+
+async fn handle_refresh_request(
+    state: &AppState,
+    session: &mut ActiveSession,
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    request: nodelite_proto::RefreshTokenRequestMessage,
+) -> Result<LoopAction, ProtocolError> {
+    if !ensure_current_token(
+        state,
+        session,
+        "disconnecting session after token expiry before refresh",
+    )
+    .await
+    {
+        return Ok(LoopAction::Break);
+    }
+    if request.node_id != session.node_id {
+        warn!(
+            session_node_id = %session.node_id,
+            client_supplied_node_id = %request.node_id,
+            "ignoring client-supplied node_id in refresh_token_request",
+        );
+    }
+    match state.registry.refresh_token(&session.node_id).await {
+        Ok((new_token, expires_at, new_generation)) => {
+            let response =
+                WireMessage::RefreshTokenResponse(nodelite_proto::RefreshTokenResponseMessage {
+                    new_token: new_token.clone(),
+                    expires_at: expires_at.to_rfc3339(),
+                });
+            let payload = serde_json::to_string(&response)
+                .map_err(|error| anyhow!("failed to serialize refresh response: {error}"))?;
+            sender
+                .send(Message::Text(payload.into()))
+                .await
+                .map_err(|error| anyhow!("failed to send refresh response: {error}"))?;
+            session.session_token = new_token;
+            session.session_generation = new_generation;
+            info!(node_id = %session.node_id, "token refreshed successfully");
+        }
+        Err(error) => {
+            warn!(node_id = %session.node_id, error = ?error, "failed to refresh token");
+            let notice = WireMessage::ServerNotice(ServerNoticeMessage {
+                level: nodelite_proto::NoticeLevel::Error,
+                message: "Failed to refresh token".to_string(),
+            });
+            let payload = serde_json::to_string(&notice)
+                .map_err(|error| anyhow!("failed to serialize notice: {error}"))?;
+            sender
+                .send(Message::Text(payload.into()))
+                .await
+                .map_err(|error| anyhow!("failed to send notice: {error}"))?;
+        }
+    }
+    Ok(LoopAction::Continue)
+}
+
+async fn handle_session_command(
+    state: &AppState,
+    session: &mut ActiveSession,
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    command: SessionCommand,
+) -> Result<LoopAction, ProtocolError> {
+    match command {
+        SessionCommand::RefreshToken { response } => {
+            match refresh_session_token(
+                sender,
+                &state.registry,
+                &session.node_id,
+                &mut session.session_token,
+                &mut session.session_generation,
+                "manual",
+            )
+            .await
+            {
+                Ok(expires_at) => {
+                    let _ = response.send(Ok(SessionRefreshReply {
+                        token_expires_at: expires_at,
+                    }));
+                    Ok(LoopAction::Continue)
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    let _ = response.send(Err(message));
+                    Err(ProtocolError::Server(error))
+                }
+            }
+        }
+    }
+}
+
+async fn handle_ping_tick(
+    state: &AppState,
+    shared: &crate::state::SharedState,
+    session: &mut ActiveSession,
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    loop_state: &mut SessionLoopState,
+) -> Result<LoopAction, ProtocolError> {
+    if !shared
+        .is_current_session(&session.node_id, session.session_id)
+        .await
+    {
+        warn!(
+            node_id = %session.node_id,
+            session_id = session.session_id,
+            "closing superseded websocket session"
+        );
+        return Ok(LoopAction::Break);
+    }
+    if !ensure_current_token(
+        state,
+        session,
+        "closing websocket session after registry token change",
+    )
+    .await
+    {
+        return Ok(LoopAction::Break);
+    }
+    if should_refresh_agent_token(&state.registry, &session.node_id).await? {
+        refresh_session_token(
+            sender,
+            &state.registry,
+            &session.node_id,
+            &mut session.session_token,
+            &mut session.session_generation,
+            "pre-expiry",
+        )
+        .await?;
+    }
+
+    prune_outstanding_pings(
+        &mut loop_state.outstanding_pings,
+        loop_state.ping_expiry,
+        shared.config().max_outstanding_pings,
+    );
+    let nonce = loop_state.next_ping_nonce;
+    loop_state.next_ping_nonce = loop_state.next_ping_nonce.saturating_add(1);
+    loop_state.outstanding_pings.insert(nonce, Instant::now());
+    let ping = encode_ping_message(nonce);
+    sender
+        .send(Message::Text(ping.into()))
+        .await
+        .map_err(|error| anyhow!("failed to send ping: {error}"))?;
+    Ok(LoopAction::Continue)
+}
+
+async fn ensure_current_token(
+    state: &AppState,
+    session: &ActiveSession,
+    log_message: &str,
+) -> bool {
+    if state
+        .registry
+        .is_token_current(&session.node_id, session.session_generation)
+        .await
+    {
+        return true;
+    }
+    warn!(node_id = %session.node_id, "{log_message}");
+    false
 }
 
 async fn should_refresh_agent_token(registry: &NodeRegistry, node_id: &str) -> Result<bool> {
