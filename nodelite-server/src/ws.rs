@@ -31,7 +31,7 @@ use tracing::{error, info, warn};
 
 use crate::AppState;
 use crate::admission::{WsConnectionPermit, resolve_client_ip, ws_admission_error_response};
-use crate::registry::NodeRegistry;
+use crate::registry::{NodeRegistry, RegistryError};
 use crate::sanitize::{
     METRIC_ANOMALY_SESSION_LIMIT, METRIC_ANOMALY_WINDOW_SECS, sanitize_snapshot,
     should_disconnect_for_metric_anomalies, update_metric_anomaly_window,
@@ -243,15 +243,16 @@ async fn authorize_hello(
                 "websocket authentication rejected",
             );
             state.ws_admission.record_auth_failure(client_ip);
-            let error_msg = error.to_string();
-            let (notice_message, error_label): (&str, &str) = if error_msg.contains("token expired")
-            {
-                (
-                    "token expired; run `nodelite-server install-agent --rotate-token` and reinstall this node",
-                    "token expired",
-                )
-            } else {
-                ("unauthorized", "unauthorized")
+            let (notice_message, error_label): (&str, &str) = match &error {
+                RegistryError::TokenExpired { node_id } => {
+                    warn!(expired_node_id = %node_id, "websocket token expired");
+                    (
+                        "token expired; run `nodelite-server install-agent --rotate-token` and reinstall this node",
+                        "token expired",
+                    )
+                }
+                RegistryError::Unauthorized => ("unauthorized", "unauthorized"),
+                _ => ("unauthorized", "unauthorized"),
             };
             let notice = WireMessage::ServerNotice(ServerNoticeMessage {
                 level: nodelite_proto::NoticeLevel::Error,

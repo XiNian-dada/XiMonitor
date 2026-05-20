@@ -8,6 +8,7 @@
 //! - [`RegisteredNode`]:被认证的 Agent 凭证(node_id + token)。
 //! - [`InstallSession`]:一次性的"安装令牌",拥有它可以拉取 Agent 配置。
 
+mod error;
 mod render;
 mod storage;
 #[cfg(test)]
@@ -19,7 +20,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use nodelite_proto::{
     MAX_NODE_TAG_BYTES, MAX_NODE_TAGS, NodeIdentity, normalize_string_list, validate_identifier,
@@ -28,6 +28,7 @@ use nodelite_proto::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+pub use self::error::{RegistryError, RegistryResult};
 #[allow(unused_imports)]
 pub use self::render::{
     build_agent_server_url, build_github_release_base_url, build_install_bootstrap_url,
@@ -177,7 +178,7 @@ const INSTALL_TOKEN_TTL_MINUTES: i64 = 15;
 
 impl NodeRegistry {
     /// 从磁盘加载注册表;文件不存在时返回空注册表(首次部署的合理状态)。
-    pub async fn load(path: &Path) -> Result<Self> {
+    pub async fn load(path: &Path) -> RegistryResult<Self> {
         let state = load_registry_state(path).await?;
 
         Ok(Self {
@@ -188,9 +189,13 @@ impl NodeRegistry {
 
     /// 校验 Agent 提交的 Hello 信息与 token,通过后返回"覆盖了注册表里权威字段"的身份
     /// 以及当时的 token 代次, 供 WS 会话后续 hot-path 比较使用。
-    pub async fn authorize(&self, identity: &NodeIdentity, token: &str) -> Result<AuthorizedNode> {
+    pub async fn authorize(
+        &self,
+        identity: &NodeIdentity,
+        token: &str,
+    ) -> RegistryResult<AuthorizedNode> {
         validate_runtime_identity(identity)?;
-        validate_non_empty("hello.token", token)?;
+        validate_non_empty("hello.token", token).map_err(RegistryError::validation)?;
         let state = self.state.read().await;
         authorize_identity(&state.entries, identity, token)
     }
@@ -220,20 +225,24 @@ impl NodeRegistry {
     /// 刷新节点的 Token:生成新明文 token, 哈希入库,代次 +1, 延长过期时间。
     /// 返回 (new_plaintext_token, expires_at, new_generation)。明文只在
     /// 进程内存里短暂存在,从这里被传递给 WS 端发送给 agent。
-    pub async fn refresh_token(&self, node_id: &str) -> Result<(String, DateTime<Utc>, u64)> {
+    pub async fn refresh_token(
+        &self,
+        node_id: &str,
+    ) -> RegistryResult<(String, DateTime<Utc>, u64)> {
         let path = Arc::clone(&self.path);
         let node_id = node_id.to_string();
         let ((new_token, expires_at, generation), _) =
             mutate_registry_file(path.as_ref(), move |file| {
                 let now = Utc::now();
                 let Some(node) = file.nodes.iter_mut().find(|n| n.node_id == node_id) else {
-                    anyhow::bail!("node not found");
+                    return Err(RegistryError::NodeNotFound(node_id.clone()));
                 };
 
                 let new_token = generate_token()?;
                 let expires_at = now + ChronoDuration::days(DEFAULT_TOKEN_VALIDITY_DAYS);
-                node.token_hash =
-                    hash_token(&new_token).context("failed to hash refreshed token")?;
+                node.token_hash = hash_token(&new_token).map_err(|error| {
+                    RegistryError::internal("failed to hash refreshed token", error.into())
+                })?;
                 node.token_generation = node.token_generation.saturating_add(1);
                 node.token_expires_at = Some(expires_at);
                 // 升级路径残留的明文也在这里清空,确保从此刻起 disk 上彻底无明文。
@@ -250,7 +259,7 @@ impl NodeRegistry {
     }
 
     /// 从磁盘重新加载注册表。返回 `Ok(true)` 表示发现了变化。
-    pub async fn reload(&self) -> Result<bool> {
+    pub async fn reload(&self) -> RegistryResult<bool> {
         let next_state = load_registry_state(self.path.as_path()).await?;
         let mut state = self.state.write().await;
         if *state == next_state {
@@ -294,8 +303,11 @@ impl NodeRegistry {
     /// 当前明文 session token —— 后者由 install_session 在颁发时短暂持有,
     /// 这是 #56 之后整个系统里唯一返回明文的入口。一旦本函数返回,
     /// install_session(连同明文)即被从注册表删除。
-    pub async fn consume_install_token(&self, token: &str) -> Result<Option<ConsumedInstall>> {
-        validate_non_empty("install token", token)?;
+    pub async fn consume_install_token(
+        &self,
+        token: &str,
+    ) -> RegistryResult<Option<ConsumedInstall>> {
+        validate_non_empty("install token", token).map_err(RegistryError::validation)?;
 
         let token = token.to_string();
         let (result, file) = mutate_registry_file(self.path.as_path(), move |file| {
@@ -329,7 +341,7 @@ impl NodeRegistry {
         self.path.as_path()
     }
 
-    async fn replace_state_from_file(&self, file: RegistryFile) -> Result<()> {
+    async fn replace_state_from_file(&self, file: RegistryFile) -> RegistryResult<()> {
         let state = storage::load_registry_state_from_file(self.path.as_path(), file)?;
         let mut guard = self.state.write().await;
         *guard = state;
@@ -340,13 +352,14 @@ impl NodeRegistry {
 /// 创建或更新一个节点:首次出现时插入新条目,已存在时按需轮换 token、覆盖标签等。
 ///
 /// 同时为该节点签发一个一次性安装令牌。这是 CLI 命令的核心入口。
-pub async fn issue_node(path: &Path, request: IssueNodeRequest) -> Result<IssueNodeResult> {
-    validate_identifier("node_id", &request.node_id)?;
+pub async fn issue_node(path: &Path, request: IssueNodeRequest) -> RegistryResult<IssueNodeResult> {
+    validate_identifier("node_id", &request.node_id).map_err(RegistryError::validation)?;
     if let Some(node_label) = request.node_label.as_deref() {
-        validate_non_empty("node_label", node_label)?;
+        validate_non_empty("node_label", node_label).map_err(RegistryError::validation)?;
     }
     let normalized_tags = normalize_string_list(request.tags.clone());
-    validate_tag_list("tags", &normalized_tags, MAX_NODE_TAGS, MAX_NODE_TAG_BYTES)?;
+    validate_tag_list("tags", &normalized_tags, MAX_NODE_TAGS, MAX_NODE_TAG_BYTES)
+        .map_err(RegistryError::validation)?;
 
     let request = request.clone();
     let (result, _) = mutate_registry_file(path, move |file| {
@@ -370,8 +383,9 @@ pub async fn issue_node(path: &Path, request: IssueNodeRequest) -> Result<IssueN
             // 每次 issue_node 都强制轮换 token,确保一次 install 流程对应一次 token 颁发。
             let session_plaintext = {
                 let new_token = generate_token()?;
-                file.nodes[index].token_hash =
-                    hash_token(&new_token).context("failed to hash token")?;
+                file.nodes[index].token_hash = hash_token(&new_token).map_err(|error| {
+                    RegistryError::internal("failed to hash token", error.into())
+                })?;
                 file.nodes[index].token_generation =
                     file.nodes[index].token_generation.saturating_add(1);
                 file.nodes[index].token_expires_at =
@@ -399,7 +413,9 @@ pub async fn issue_node(path: &Path, request: IssueNodeRequest) -> Result<IssueN
         }
 
         let plaintext_token = generate_token()?;
-        let token_hash = hash_token(&plaintext_token).context("failed to hash issued token")?;
+        let token_hash = hash_token(&plaintext_token).map_err(|error| {
+            RegistryError::internal("failed to hash issued token", error.into())
+        })?;
         let node = RegisteredNode {
             node_id: request.node_id.trim().to_string(),
             node_label: request

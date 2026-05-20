@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::anyhow;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -12,7 +12,8 @@ use crate::encoding::hex_encode;
 
 use super::{
     ARGON2_ITERATIONS, ARGON2_MEMORY_KIB, ARGON2_PARALLELISM, AuthorizedNode,
-    INSTALL_TOKEN_TTL_MINUTES, InstallSession, RegisteredNode, RegistryFile,
+    INSTALL_TOKEN_TTL_MINUTES, InstallSession, RegisteredNode, RegistryError, RegistryFile,
+    RegistryResult,
 };
 
 pub(super) fn prune_expired_install_sessions(file: &mut RegistryFile, now: DateTime<Utc>) -> bool {
@@ -27,7 +28,7 @@ pub(super) fn mint_install_session(
     node_id: &str,
     now: DateTime<Utc>,
     node_session_token: String,
-) -> Result<InstallSession> {
+) -> RegistryResult<InstallSession> {
     file.install_sessions
         .retain(|session| session.node_id != node_id);
     let session = InstallSession {
@@ -45,14 +46,16 @@ pub(super) fn authorize_identity(
     entries: &HashMap<String, RegisteredNode>,
     identity: &NodeIdentity,
     token: &str,
-) -> Result<AuthorizedNode> {
+) -> RegistryResult<AuthorizedNode> {
     if let Some(entry) = entries.get(identity.node_id.as_str()) {
         if !token_matches_entry(token, entry) {
-            bail!("unauthorized");
+            return Err(RegistryError::Unauthorized);
         }
 
         if !token_is_unexpired(entry, Utc::now()) {
-            bail!("token expired");
+            return Err(RegistryError::TokenExpired {
+                node_id: entry.node_id.clone(),
+            });
         }
 
         let mut identity = identity.clone();
@@ -65,7 +68,7 @@ pub(super) fn authorize_identity(
         });
     }
 
-    bail!("unauthorized");
+    Err(RegistryError::Unauthorized)
 }
 
 pub(super) fn is_token_current(
@@ -118,14 +121,16 @@ fn argon2_instance() -> Argon2<'static> {
 
 /// 把明文 token 哈希成 Argon2id PHC 字符串。返回的字符串自带 salt + params,
 /// 可直接存入 registry.json 并在后续 verify 时无需额外参数。
-pub(super) fn hash_token(token: &str) -> Result<String> {
+pub(super) fn hash_token(token: &str) -> RegistryResult<String> {
     let mut salt_bytes = [0u8; 16];
-    fill_random(&mut salt_bytes).context("failed to generate token salt")?;
+    fill_random(&mut salt_bytes).map_err(|error| {
+        RegistryError::internal("failed to generate token salt", anyhow!(error))
+    })?;
     let salt = SaltString::encode_b64(&salt_bytes)
-        .map_err(|error| anyhow!("failed to encode token salt: {error}"))?;
+        .map_err(|error| RegistryError::internal("failed to encode token salt", anyhow!(error)))?;
     let hash = argon2_instance()
         .hash_password(token.as_bytes(), &salt)
-        .map_err(|error| anyhow!("failed to hash token: {error}"))?;
+        .map_err(|error| RegistryError::internal("failed to hash token", anyhow!(error)))?;
     Ok(hash.to_string())
 }
 
@@ -144,12 +149,16 @@ pub(super) fn verify_token(candidate: &str, phc: &str) -> bool {
 ///
 /// 这一步在 [`load_registry_state`] 中完成,完成后调用方会把 file 写回磁盘,
 /// 之后磁盘上不再保留明文。返回值表示是否触发了任何变更。
-pub(super) fn migrate_legacy_tokens(file: &mut RegistryFile) -> Result<bool> {
+pub(super) fn migrate_legacy_tokens(file: &mut RegistryFile) -> RegistryResult<bool> {
     let mut changed = false;
     for node in &mut file.nodes {
         if node.token_hash.is_empty() && !node.token.is_empty() {
-            node.token_hash = hash_token(&node.token)
-                .with_context(|| format!("hash legacy token for node {}", node.node_id))?;
+            node.token_hash = hash_token(&node.token).map_err(|error| {
+                RegistryError::internal(
+                    "failed to hash legacy token during registry migration",
+                    anyhow!("node {}: {error}", node.node_id),
+                )
+            })?;
             // 用 zero-overwrite 清掉明文。即便后续 file 没立即写盘,内存里的副本
             // 也尽量短地存在明文。
             node.token.clear();
@@ -168,8 +177,10 @@ pub(super) fn constant_time_eq(left: &str, right: &str) -> bool {
 }
 
 /// 生成 256-bit 的随机 token 并以十六进制字符串形式返回。
-pub(super) fn generate_token() -> Result<String> {
+pub(super) fn generate_token() -> RegistryResult<String> {
     let mut bytes = [0_u8; 32];
-    fill_random(&mut bytes).context("failed to gather secure random bytes")?;
+    fill_random(&mut bytes).map_err(|error| {
+        RegistryError::internal("failed to gather secure random bytes", anyhow!(error))
+    })?;
     Ok(hex_encode(&bytes))
 }

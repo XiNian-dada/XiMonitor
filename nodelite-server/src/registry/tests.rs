@@ -5,10 +5,10 @@ use proptest::prelude::*;
 use tokio::runtime::Runtime;
 
 use super::{
-    IssueNodeRequest, MAX_NODE_TAG_BYTES, NodeRegistry, RegisteredNode, RegistryFile,
-    build_agent_server_url, build_github_release_base_url, default_agent_release_base_url,
-    issue_node, release_registry_lock_with, render_install_command, token_is_unexpired,
-    validate_registered_node, verify_token,
+    IssueNodeRequest, MAX_NODE_TAG_BYTES, NodeRegistry, RegisteredNode, RegistryError,
+    RegistryFile, build_agent_server_url, build_github_release_base_url,
+    default_agent_release_base_url, issue_node, release_registry_lock_with, render_install_command,
+    token_is_unexpired, validate_registered_node, verify_token,
 };
 use nodelite_proto::NodeIdentity;
 
@@ -451,7 +451,10 @@ fn expired_tokens_are_not_current_after_handshake() {
             .authorize(&identity_for("expired-01"), "secret")
             .await
             .expect_err("expired token should not authorize");
-        assert_eq!(error.to_string(), "token expired");
+        assert!(matches!(
+            error,
+            RegistryError::TokenExpired { ref node_id } if node_id == "expired-01"
+        ));
         assert!(!registry.is_token_current("expired-01", 1).await);
 
         let _ = std::fs::remove_file(&path);
@@ -513,7 +516,7 @@ fn unenrolled_nodes_are_rejected() {
             .authorize(&identity, "some-token")
             .await
             .expect_err("unenrolled node should be rejected");
-        assert_eq!(error.to_string(), "unauthorized");
+        assert!(matches!(error, RegistryError::Unauthorized));
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&temp_dir);
@@ -558,11 +561,36 @@ fn wrong_tokens_use_the_same_auth_error() {
             .authorize(&identity, "wrong-secret")
             .await
             .expect_err("wrong token should be rejected");
-        assert_eq!(error.to_string(), "unauthorized");
+        assert!(matches!(error, RegistryError::Unauthorized));
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&temp_dir);
     });
+}
+
+#[tokio::test]
+async fn refresh_token_reports_missing_nodes_with_typed_error() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!("nodelite-registry-missing-node-{unique}"));
+    std::fs::create_dir_all(&temp_dir).expect("temp dir");
+    let path = temp_dir.join("server.json");
+    std::fs::write(&path, "{\"nodes\":[],\"install_sessions\":[]}")
+        .expect("empty registry should be written");
+    let registry = NodeRegistry::load(&path)
+        .await
+        .expect("registry should load");
+
+    let error = registry
+        .refresh_token("missing-01")
+        .await
+        .expect_err("missing nodes should surface a typed error");
+    assert!(matches!(error, RegistryError::NodeNotFound(ref node_id) if node_id == "missing-01"));
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&temp_dir);
 }
 
 #[cfg(unix)]

@@ -1,19 +1,26 @@
-use anyhow::{Context, Result, anyhow, bail};
 use url::Url;
 
-use super::RegisteredNode;
+use super::{RegisteredNode, RegistryError, RegistryResult};
 
 /// 从 `public_base_url` 推导 Agent 应连接的 WebSocket URL(http → ws,https → wss)。
-pub fn build_agent_server_url(public_base_url: &str) -> Result<String> {
+pub fn build_agent_server_url(public_base_url: &str) -> RegistryResult<String> {
     let mut url = Url::parse(public_base_url)
-        .with_context(|| "invalid server.public_base_url".to_string())?;
+        .map_err(|error| RegistryError::invalid_config("server.public_base_url", error))?;
     let scheme = match url.scheme() {
         "http" => "ws",
         "https" => "wss",
-        other => bail!("unsupported public_base_url scheme for agent install: {other}"),
+        other => {
+            return Err(RegistryError::UnsupportedPublicBaseUrlScheme(
+                other.to_string(),
+            ));
+        }
     };
-    url.set_scheme(scheme)
-        .map_err(|_| anyhow!("failed to set websocket scheme"))?;
+    url.set_scheme(scheme).map_err(|_| {
+        RegistryError::internal(
+            "failed to set websocket scheme",
+            anyhow::anyhow!("url::Url refused to switch scheme"),
+        )
+    })?;
     url.set_path("/ws");
     url.set_query(None);
     url.set_fragment(None);
@@ -21,9 +28,9 @@ pub fn build_agent_server_url(public_base_url: &str) -> Result<String> {
 }
 
 /// 拼装"安装脚本下载 URL"。
-pub fn build_install_script_url(public_base_url: &str) -> Result<String> {
+pub fn build_install_script_url(public_base_url: &str) -> RegistryResult<String> {
     let mut url = Url::parse(public_base_url)
-        .with_context(|| "invalid server.public_base_url".to_string())?;
+        .map_err(|error| RegistryError::invalid_config("server.public_base_url", error))?;
     url.set_path("/install/install-agent.sh");
     url.set_query(None);
     url.set_fragment(None);
@@ -31,9 +38,9 @@ pub fn build_install_script_url(public_base_url: &str) -> Result<String> {
 }
 
 /// 拼装"安装引导 URL":Agent 安装脚本会带上 Bearer 安装令牌请求这个地址换取自己的 agent.toml。
-pub fn build_install_bootstrap_url(public_base_url: &str) -> Result<String> {
+pub fn build_install_bootstrap_url(public_base_url: &str) -> RegistryResult<String> {
     let mut url = Url::parse(public_base_url)
-        .with_context(|| "invalid server.public_base_url".to_string())?;
+        .map_err(|error| RegistryError::invalid_config("server.public_base_url", error))?;
     url.set_path("/install/bootstrap");
     url.set_query(None);
     url.set_fragment(None);
@@ -42,27 +49,38 @@ pub fn build_install_bootstrap_url(public_base_url: &str) -> Result<String> {
 
 /// 从 GitHub 仓库 URL 推导 `releases/latest/download` 形式的下载基地址。
 /// 只支持 GitHub 仓库,避免误把任意 URL 当作发布源。
-pub fn build_github_release_base_url(repository_url: &str) -> Result<String> {
-    let url = Url::parse(repository_url).with_context(|| "invalid repository URL".to_string())?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow!("repository URL must include a host"))?;
+pub fn build_github_release_base_url(repository_url: &str) -> RegistryResult<String> {
+    let url = Url::parse(repository_url)
+        .map_err(|error| RegistryError::invalid_config("repository URL", error))?;
+    let host = url.host_str().ok_or_else(|| {
+        RegistryError::invalid_config("repository URL", "repository URL must include a host")
+    })?;
     if host != "github.com" {
-        bail!("only GitHub repositories are supported for latest release installs");
+        return Err(RegistryError::invalid_config(
+            "repository URL",
+            "only GitHub repositories are supported for latest release installs",
+        ));
     }
 
-    let mut segments = url
-        .path_segments()
-        .ok_or_else(|| anyhow!("repository URL must include an owner and repo"))?;
+    let mut segments = url.path_segments().ok_or_else(|| {
+        RegistryError::invalid_config(
+            "repository URL",
+            "repository URL must include an owner and repo",
+        )
+    })?;
     let owner = segments
         .next()
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("repository URL must include an owner"))?
+        .ok_or_else(|| {
+            RegistryError::invalid_config("repository URL", "repository URL must include an owner")
+        })?
         .to_string();
     let repo = segments
         .next()
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("repository URL must include a repo"))?
+        .ok_or_else(|| {
+            RegistryError::invalid_config("repository URL", "repository URL must include a repo")
+        })?
         .trim_end_matches(".git")
         .to_string();
 
@@ -74,7 +92,7 @@ pub fn build_github_release_base_url(repository_url: &str) -> Result<String> {
 }
 
 /// 缺省下载源:由当前 crate 在编译期注入的仓库地址推导而来。
-pub fn default_agent_release_base_url() -> Result<String> {
+pub fn default_agent_release_base_url() -> RegistryResult<String> {
     build_github_release_base_url(env!("CARGO_PKG_REPOSITORY"))
 }
 
@@ -85,7 +103,7 @@ pub fn render_install_command(
     public_base_url: &str,
     install_token: &str,
     agent_release_base_url: &str,
-) -> Result<String> {
+) -> RegistryResult<String> {
     let script_url = build_install_script_url(public_base_url)?;
     let bootstrap_url = build_install_bootstrap_url(public_base_url)?;
     let lines = [
@@ -105,7 +123,7 @@ pub fn render_install_command(
 pub fn render_upgrade_command(
     public_base_url: &str,
     agent_release_base_url: &str,
-) -> Result<String> {
+) -> RegistryResult<String> {
     let script_url = build_install_script_url(public_base_url)?;
     let lines = [
         format!("curl -fsSL {} | \\", shell_quote(&script_url)),
@@ -122,7 +140,7 @@ pub fn render_agent_config(
     public_base_url: &str,
     node: &RegisteredNode,
     plaintext_token: &str,
-) -> Result<String> {
+) -> RegistryResult<String> {
     let server_url = build_agent_server_url(public_base_url)?;
     let mut content = String::new();
     content.push_str("[agent]\n");
