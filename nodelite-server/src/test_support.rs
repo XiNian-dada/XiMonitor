@@ -13,23 +13,16 @@ use getrandom::fill as fill_random;
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tower_http::trace::TraceLayer;
 
-use crate::AppState;
-use crate::ServerReadiness;
-use crate::admission::{InstallAdmissionConfig, InstallAdmissionController, WsAdmissionController};
-use crate::agent_logs::AgentLogStore;
-use crate::auth::{ReadonlyRouteAuth, TwoFactorSessions};
 use crate::handlers::{metrics, node_history, node_status, nodes, overview, require_readonly_auth};
-use crate::history::HistoryStore;
 use crate::registry::{IssueNodeRequest, NodeRegistry, issue_node};
 use crate::set_protected_response_headers;
-use crate::state::SharedState;
+use crate::state::{SessionRefreshReply, SharedState};
 use crate::ws::ws_handler;
 use nodelite_proto::{
     DiskUsage, HelloMessage, HistoryPoint, LoadAverage, MemoryUsage, NetworkCounters, NodeIdentity,
@@ -40,7 +33,81 @@ use nodelite_proto::{
 pub const TEST_BASIC_AUTH_HEADER: &str = "Basic dmlld2VyOnNlY3JldA==";
 pub const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-type TestSocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
+pub(crate) type TestSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
+
+pub(crate) fn test_ws_config(
+    max_total_connections: usize,
+    max_connections_per_ip: usize,
+) -> WsConfig {
+    WsConfig {
+        max_total_connections,
+        max_connections_per_ip,
+        auth_fail_window_secs: 300,
+        auth_fail_max_attempts: 12,
+        auth_block_secs: 900,
+    }
+}
+
+pub(crate) fn test_server_config(
+    listen: SocketAddr,
+    public_base_url: String,
+    registry_path: PathBuf,
+    history_path: PathBuf,
+    snapshot_path: PathBuf,
+) -> ServerConfig {
+    ServerConfig {
+        listen,
+        public_base_url,
+        insecure_allow_http: false,
+        readonly_auth: Some(ReadonlyAuthConfig {
+            username: "viewer".to_string(),
+            password: "secret".to_string(),
+            enable_2fa: false,
+            totp_secret: None,
+        }),
+        ws: test_ws_config(128, 128),
+        node_registry_path: registry_path,
+        history_db_path: history_path,
+        snapshot_path,
+        stale_after_secs: 5,
+        ping_interval_secs: 60,
+        max_message_bytes: 64 * 1024,
+        refresh_interval_secs: 5,
+        ignored_filesystems: vec!["tmpfs".to_string(), "devtmpfs".to_string()],
+        agent_release_base_url: None,
+        agent_release_sha256_x86_64: None,
+        agent_release_sha256_aarch64: None,
+        hello_timeout_secs: 10,
+        max_outstanding_pings: 32,
+        insecure_transport_warn_interval_secs: 900,
+        max_sanitized_disks: 64,
+        max_sanitized_string_bytes: 256,
+        metric_anomaly_session_limit: 5,
+        sqlite_busy_timeout_secs: 5,
+    }
+}
+
+pub(crate) fn synthetic_identity(
+    node_id: &str,
+    node_label: &str,
+    agent_version: &str,
+    kernel_version: Option<&str>,
+    tag: &str,
+) -> NodeIdentity {
+    NodeIdentity {
+        node_id: node_id.to_string(),
+        node_label: node_label.to_string(),
+        hostname: format!("{node_id}.example.internal"),
+        os: "Linux".to_string(),
+        kernel_version: kernel_version.map(str::to_string),
+        cpu_model: Some("Rust Hypervisor".to_string()),
+        cpu_cores: 4,
+        agent_version: agent_version.to_string(),
+        boot_time: Some(Utc::now()),
+        tags: vec![tag.to_string()],
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct TestNode {
@@ -82,72 +149,16 @@ impl TestServer {
         let registry_path = temp_dir.join("server.json");
         let history_path = temp_dir.join("history.sqlite3");
         let snapshot_path = temp_dir.join("snapshot.json");
-
-        let config = Arc::new(ServerConfig {
-            listen: addr,
-            public_base_url: format!("http://{addr}"),
-            insecure_allow_http: false,
-            readonly_auth: Some(ReadonlyAuthConfig {
-                username: "viewer".to_string(),
-                password: "secret".to_string(),
-                enable_2fa: false,
-                totp_secret: None,
-            }),
-            ws: WsConfig {
-                max_total_connections: 128,
-                max_connections_per_ip: 128,
-                auth_fail_window_secs: 300,
-                auth_fail_max_attempts: 12,
-                auth_block_secs: 900,
-            },
-            node_registry_path: registry_path.clone(),
-            history_db_path: history_path.clone(),
-            snapshot_path: snapshot_path.clone(),
-            stale_after_secs: 5,
-            ping_interval_secs: 60,
-            max_message_bytes: 64 * 1024,
-            refresh_interval_secs: 5,
-            ignored_filesystems: vec!["tmpfs".to_string(), "devtmpfs".to_string()],
-            agent_release_base_url: None,
-            agent_release_sha256_x86_64: None,
-            agent_release_sha256_aarch64: None,
-            hello_timeout_secs: 10,
-            max_outstanding_pings: 32,
-            insecure_transport_warn_interval_secs: 900,
-            max_sanitized_disks: 64,
-            max_sanitized_string_bytes: 256,
-            metric_anomaly_session_limit: 5,
-            sqlite_busy_timeout_secs: 5,
-        });
-
-        let history = HistoryStore::new(history_path, 5);
-        history.initialize().await;
-        let readiness = ServerReadiness::new(history.is_available());
-        let registry = NodeRegistry::load(&registry_path).await?;
-        let state = AppState {
-            history,
-            agent_logs: AgentLogStore::new(),
-            install_admission: InstallAdmissionController::new(InstallAdmissionConfig {
-                auth_fail_window_secs: config.ws.auth_fail_window_secs,
-                auth_fail_max_attempts: config.ws.auth_fail_max_attempts,
-                auth_block_secs: config.ws.auth_block_secs,
-            }),
-            verify_2fa_admission: InstallAdmissionController::new(InstallAdmissionConfig {
-                auth_fail_window_secs: config.ws.auth_fail_window_secs,
-                auth_fail_max_attempts: config.ws.auth_fail_max_attempts,
-                auth_block_secs: config.ws.auth_block_secs,
-            }),
-            readiness,
-            registry: registry.clone(),
-            shared: SharedState::new(config.clone()),
-            ws_admission: WsAdmissionController::new(&config.ws),
-            readonly_auth: Arc::new(RwLock::new(ReadonlyRouteAuth::from_config(
-                config.readonly_auth.clone(),
-            ))),
-            two_factor_sessions: TwoFactorSessions::new(),
-            config_path: Arc::new(temp_dir.join("server.toml")),
-            shutdown: tokio_util::sync::CancellationToken::new(),
-        };
+        let config = Arc::new(test_server_config(
+            addr,
+            format!("http://{addr}"),
+            registry_path.clone(),
+            history_path,
+            snapshot_path,
+        ));
+        let state =
+            crate::AppState::test_fixture(config, Arc::new(temp_dir.join("server.toml"))).await?;
+        let registry = state.registry.clone();
         let shared = state.shared.clone();
         let shutdown = state.shutdown.clone();
         let protected_routes = Router::new()
@@ -288,7 +299,7 @@ impl TestServer {
     }
 
     pub async fn request_live_token_refresh(&self, node_id: &str) -> Result<DateTime<Utc>> {
-        let response_rx = self
+        let response_rx: tokio::sync::oneshot::Receiver<Result<SessionRefreshReply, String>> = self
             .shared
             .request_live_token_refresh(node_id)
             .await
@@ -385,7 +396,7 @@ impl TestAgent {
             identity: fake_identity(node),
         });
         send_wire_message(&mut socket, &hello).await?;
-        wait_for_authenticated_notice(&mut socket, &node.node_id).await?;
+        wait_for_authenticated_notice(&mut socket, &node.node_id, TEST_TIMEOUT).await?;
         Ok(Self { socket })
     }
 
@@ -525,23 +536,22 @@ async fn fetch_http_body(addr: SocketAddr, path: &str) -> Result<String> {
 }
 
 fn fake_identity(node: &TestNode) -> NodeIdentity {
-    NodeIdentity {
-        node_id: node.node_id.clone(),
-        node_label: node.node_label.clone(),
-        hostname: format!("{}.example.internal", node.node_id),
-        os: "Linux".to_string(),
-        kernel_version: Some("6.8.0-integration-test".to_string()),
-        cpu_model: Some("Rust Hypervisor".to_string()),
-        cpu_cores: 4,
-        agent_version: "integration-test".to_string(),
-        boot_time: Some(Utc::now()),
-        tags: vec!["integration-test".to_string()],
-    }
+    synthetic_identity(
+        &node.node_id,
+        &node.node_label,
+        "integration-test",
+        Some("6.8.0-integration-test"),
+        "integration-test",
+    )
 }
 
 pub fn fake_snapshot(uptime_secs: u64) -> NodeSnapshot {
+    fake_snapshot_at(uptime_secs, Utc::now())
+}
+
+pub(crate) fn fake_snapshot_at(uptime_secs: u64, collected_at: DateTime<Utc>) -> NodeSnapshot {
     NodeSnapshot {
-        collected_at: Utc::now(),
+        collected_at,
         cpu_usage_percent: 12.5 + (uptime_secs % 7) as f64,
         load: LoadAverage {
             one: 0.3,
@@ -582,8 +592,12 @@ async fn send_wire_message(socket: &mut TestSocket, message: &WireMessage) -> Re
         .context("send websocket message")
 }
 
-async fn wait_for_authenticated_notice(socket: &mut TestSocket, node_id: &str) -> Result<()> {
-    timeout(TEST_TIMEOUT, async {
+pub(crate) async fn wait_for_authenticated_notice(
+    socket: &mut TestSocket,
+    node_id: &str,
+    timeout_duration: Duration,
+) -> Result<()> {
+    timeout(timeout_duration, async {
         loop {
             let Some(frame) = socket.next().await else {
                 bail!("socket closed before authenticated notice");

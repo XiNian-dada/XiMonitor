@@ -76,3 +76,45 @@ impl ServerReadiness {
             .store(healthy, Ordering::Relaxed);
     }
 }
+
+#[cfg(test)]
+impl AppState {
+    pub(crate) async fn test_fixture(
+        config: Arc<nodelite_proto::ServerConfig>,
+        config_path: Arc<PathBuf>,
+    ) -> anyhow::Result<Self> {
+        let history = HistoryStore::new(config.history_db_path.clone(), 5);
+        history.initialize().await;
+        let readiness = ServerReadiness::new(history.is_available());
+        let registry = NodeRegistry::load(config.node_registry_path.as_path()).await?;
+
+        Ok(Self {
+            history,
+            agent_logs: AgentLogStore::new(),
+            install_admission: InstallAdmissionController::new(
+                crate::admission::InstallAdmissionConfig {
+                    auth_fail_window_secs: config.ws.auth_fail_window_secs,
+                    auth_fail_max_attempts: config.ws.auth_fail_max_attempts,
+                    auth_block_secs: config.ws.auth_block_secs,
+                },
+            ),
+            verify_2fa_admission: InstallAdmissionController::new(
+                crate::admission::InstallAdmissionConfig {
+                    auth_fail_window_secs: config.ws.auth_fail_window_secs,
+                    auth_fail_max_attempts: config.ws.auth_fail_max_attempts,
+                    auth_block_secs: config.ws.auth_block_secs,
+                },
+            ),
+            readiness,
+            registry,
+            shared: SharedState::new(config.clone()),
+            ws_admission: WsAdmissionController::new(&config.ws),
+            readonly_auth: Arc::new(RwLock::new(ReadonlyRouteAuth::from_config(
+                config.readonly_auth.clone(),
+            ))),
+            two_factor_sessions: TwoFactorSessions::new(),
+            config_path,
+            shutdown: CancellationToken::new(),
+        })
+    }
+}

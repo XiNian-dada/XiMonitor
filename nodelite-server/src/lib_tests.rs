@@ -1,7 +1,6 @@
-use std::sync::Arc;
-
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
@@ -11,8 +10,6 @@ use axum::http::{HeaderMap, Request, StatusCode, header};
 use axum::middleware::{from_fn, from_fn_with_state};
 use chrono::Utc;
 use tokio::runtime::Runtime;
-use tokio::sync::RwLock;
-use tokio_util::sync::CancellationToken;
 use tower::util::ServiceExt;
 
 use super::{
@@ -23,22 +20,20 @@ use crate::admission::{
     InstallAdmissionConfig, InstallAdmissionController, WsAdmissionController, WsAdmissionError,
     resolve_client_ip, sweep_expired_auth_failures,
 };
-use crate::agent_logs::AgentLogStore;
 use crate::auth::{ReadonlyRouteAuth, TwoFactorSessions};
 use crate::handlers::{
     bootstrap, brand_logo_dark_asset, brand_logo_light_asset, healthz, index, install_agent_script,
     install_bootstrap, is_well_formed_install_token, node_detail, node_history, node_logs,
     node_status, nodes, overview, readyz, require_readonly_auth, ui_i18n_asset,
 };
-use crate::history::HistoryStore;
-use crate::registry::{IssueNodeRequest, NodeRegistry, issue_node};
+use crate::registry::{IssueNodeRequest, issue_node};
 use crate::sanitize::{
     MAX_SANITIZED_DISKS, MAX_SANITIZED_LOAD, MAX_SANITIZED_RATE_BYTES_PER_SEC,
     MAX_SANITIZED_STRING_BYTES, METRIC_ANOMALY_SESSION_LIMIT, SanitizationReport,
     sanitize_snapshot, should_disconnect_for_metric_anomalies, truncate_to_byte_boundary,
     update_metric_anomaly_window,
 };
-use crate::state::SharedState;
+use crate::test_support::{test_server_config, test_ws_config};
 use crate::ui::index_page_csp;
 use crate::ws::ws_handler;
 use axum::routing::get;
@@ -52,68 +47,26 @@ fn router_builds_with_v08_path_syntax() {
         .expect("clock should be monotonic enough")
         .as_nanos();
     let registry_path = std::env::temp_dir().join(format!("nodelite-router-test-{unique}.json"));
-    let config = Arc::new(ServerConfig {
-        listen: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
-        public_base_url: "http://127.0.0.1:8080".to_string(),
-        insecure_allow_http: false,
-        readonly_auth: None,
-        ws: WsConfig {
-            max_total_connections: 32,
-            max_connections_per_ip: 8,
-            auth_fail_window_secs: 300,
-            auth_fail_max_attempts: 6,
-            auth_block_secs: 600,
-        },
-        node_registry_path: registry_path,
-        history_db_path: PathBuf::from("./data/history.sqlite3"),
-        snapshot_path: PathBuf::from("./data/snapshot.json"),
-        stale_after_secs: 20,
-        ping_interval_secs: 10,
-        max_message_bytes: 65536,
-        refresh_interval_secs: 5,
-        ignored_filesystems: vec!["tmpfs".to_string()],
-        agent_release_base_url: None,
-        agent_release_sha256_x86_64: None,
-        agent_release_sha256_aarch64: None,
-        hello_timeout_secs: 10,
-        max_outstanding_pings: 32,
-        insecure_transport_warn_interval_secs: 900,
-        max_sanitized_disks: 64,
-        max_sanitized_string_bytes: 256,
-        metric_anomaly_session_limit: 5,
-        sqlite_busy_timeout_secs: 5,
-    });
+    let mut config = test_server_config(
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
+        "http://127.0.0.1:8080".to_string(),
+        registry_path,
+        PathBuf::from("./data/history.sqlite3"),
+        PathBuf::from("./data/snapshot.json"),
+    );
+    config.readonly_auth = None;
+    config.ws = test_ws_config(32, 8);
+    config.stale_after_secs = 20;
+    config.ping_interval_secs = 10;
+    config.ignored_filesystems = vec!["tmpfs".to_string()];
+    let config = Arc::new(config);
     let runtime = Runtime::new().expect("runtime should build");
-    let state = AppState {
-        history: HistoryStore::new(PathBuf::from("./data/history.sqlite3"), 5),
-        agent_logs: AgentLogStore::new(),
-        install_admission: InstallAdmissionController::new(InstallAdmissionConfig {
-            auth_fail_window_secs: 300,
-            auth_fail_max_attempts: 6,
-            auth_block_secs: 600,
-        }),
-        verify_2fa_admission: InstallAdmissionController::new(InstallAdmissionConfig {
-            auth_fail_window_secs: 300,
-            auth_fail_max_attempts: 6,
-            auth_block_secs: 600,
-        }),
-        readiness: ServerReadiness::new(false),
-        registry: runtime
-            .block_on(NodeRegistry::load(config.node_registry_path.as_path()))
-            .expect("registry should load"),
-        shared: SharedState::new(config),
-        ws_admission: WsAdmissionController::new(&WsConfig {
-            max_total_connections: 32,
-            max_connections_per_ip: 8,
-            auth_fail_window_secs: 300,
-            auth_fail_max_attempts: 6,
-            auth_block_secs: 600,
-        }),
-        readonly_auth: Arc::new(RwLock::new(ReadonlyRouteAuth::from_config(None))),
-        two_factor_sessions: TwoFactorSessions::new(),
-        config_path: Arc::new(PathBuf::from("config/server.toml")),
-        shutdown: CancellationToken::new(),
-    };
+    let state = runtime
+        .block_on(AppState::test_fixture(
+            config,
+            Arc::new(PathBuf::from("config/server.toml")),
+        ))
+        .expect("state fixture should build");
 
     let _app: Router = Router::new()
         .route("/", get(index))
@@ -294,67 +247,21 @@ fn install_endpoints_disable_caching() {
         )
         .await
         .expect("node should be issued");
-        let config = Arc::new(ServerConfig {
-            listen: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
-            public_base_url: "https://monitor.example.com".to_string(),
-            insecure_allow_http: false,
-            readonly_auth: None,
-            ws: WsConfig {
-                max_total_connections: 32,
-                max_connections_per_ip: 8,
-                auth_fail_window_secs: 300,
-                auth_fail_max_attempts: 6,
-                auth_block_secs: 600,
-            },
-            node_registry_path: registry_path.clone(),
-            history_db_path: temp_dir.join("history.sqlite3"),
-            snapshot_path: temp_dir.join("snapshot.json"),
-            stale_after_secs: 20,
-            ping_interval_secs: 10,
-            max_message_bytes: 65536,
-            refresh_interval_secs: 5,
-            ignored_filesystems: vec![],
-            agent_release_base_url: None,
-            agent_release_sha256_x86_64: None,
-            agent_release_sha256_aarch64: None,
-            hello_timeout_secs: 10,
-            max_outstanding_pings: 32,
-            insecure_transport_warn_interval_secs: 900,
-            max_sanitized_disks: 64,
-            max_sanitized_string_bytes: 256,
-            metric_anomaly_session_limit: 5,
-            sqlite_busy_timeout_secs: 5,
-        });
-        let state = AppState {
-            history: HistoryStore::new(config.history_db_path.clone(), 5),
-            agent_logs: AgentLogStore::new(),
-            install_admission: InstallAdmissionController::new(InstallAdmissionConfig {
-                auth_fail_window_secs: 300,
-                auth_fail_max_attempts: 6,
-                auth_block_secs: 600,
-            }),
-            verify_2fa_admission: InstallAdmissionController::new(InstallAdmissionConfig {
-                auth_fail_window_secs: 300,
-                auth_fail_max_attempts: 6,
-                auth_block_secs: 600,
-            }),
-            readiness: ServerReadiness::new(false),
-            registry: NodeRegistry::load(&registry_path)
-                .await
-                .expect("registry should load"),
-            shared: SharedState::new(config),
-            ws_admission: WsAdmissionController::new(&WsConfig {
-                max_total_connections: 32,
-                max_connections_per_ip: 8,
-                auth_fail_window_secs: 300,
-                auth_fail_max_attempts: 6,
-                auth_block_secs: 600,
-            }),
-            readonly_auth: Arc::new(RwLock::new(ReadonlyRouteAuth::from_config(None))),
-            two_factor_sessions: TwoFactorSessions::new(),
-            config_path: Arc::new(temp_dir.join("server.toml")),
-            shutdown: CancellationToken::new(),
-        };
+        let mut config = test_server_config(
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
+            "https://monitor.example.com".to_string(),
+            registry_path.clone(),
+            temp_dir.join("history.sqlite3"),
+            temp_dir.join("snapshot.json"),
+        );
+        config.readonly_auth = None;
+        config.ws = test_ws_config(32, 8);
+        config.stale_after_secs = 20;
+        config.ping_interval_secs = 10;
+        config.ignored_filesystems = Vec::new();
+        let state = AppState::test_fixture(config.into(), Arc::new(temp_dir.join("server.toml")))
+            .await
+            .expect("state fixture should build");
         let request = Request::builder()
             .uri("/install/bootstrap")
             .header(
@@ -399,67 +306,21 @@ fn protected_routes_attach_security_headers() {
             std::env::temp_dir().join(format!("nodelite-protected-header-test-{unique}"));
         std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
         let registry_path = temp_dir.join("server.json");
-        let config = Arc::new(ServerConfig {
-            listen: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
-            public_base_url: "https://monitor.example.com".to_string(),
-            insecure_allow_http: false,
-            readonly_auth: None,
-            ws: WsConfig {
-                max_total_connections: 32,
-                max_connections_per_ip: 8,
-                auth_fail_window_secs: 300,
-                auth_fail_max_attempts: 6,
-                auth_block_secs: 600,
-            },
-            node_registry_path: registry_path.clone(),
-            history_db_path: temp_dir.join("history.sqlite3"),
-            snapshot_path: temp_dir.join("snapshot.json"),
-            stale_after_secs: 20,
-            ping_interval_secs: 10,
-            max_message_bytes: 65536,
-            refresh_interval_secs: 5,
-            ignored_filesystems: vec![],
-            agent_release_base_url: None,
-            agent_release_sha256_x86_64: None,
-            agent_release_sha256_aarch64: None,
-            hello_timeout_secs: 10,
-            max_outstanding_pings: 32,
-            insecure_transport_warn_interval_secs: 900,
-            max_sanitized_disks: 64,
-            max_sanitized_string_bytes: 256,
-            metric_anomaly_session_limit: 5,
-            sqlite_busy_timeout_secs: 5,
-        });
-        let state = AppState {
-            history: HistoryStore::new(config.history_db_path.clone(), 5),
-            agent_logs: AgentLogStore::new(),
-            install_admission: InstallAdmissionController::new(InstallAdmissionConfig {
-                auth_fail_window_secs: 300,
-                auth_fail_max_attempts: 6,
-                auth_block_secs: 600,
-            }),
-            verify_2fa_admission: InstallAdmissionController::new(InstallAdmissionConfig {
-                auth_fail_window_secs: 300,
-                auth_fail_max_attempts: 6,
-                auth_block_secs: 600,
-            }),
-            readiness: ServerReadiness::new(false),
-            registry: NodeRegistry::load(&registry_path)
-                .await
-                .expect("registry should load"),
-            shared: SharedState::new(config),
-            ws_admission: WsAdmissionController::new(&WsConfig {
-                max_total_connections: 32,
-                max_connections_per_ip: 8,
-                auth_fail_window_secs: 300,
-                auth_fail_max_attempts: 6,
-                auth_block_secs: 600,
-            }),
-            readonly_auth: Arc::new(RwLock::new(ReadonlyRouteAuth::from_config(None))),
-            two_factor_sessions: TwoFactorSessions::new(),
-            config_path: Arc::new(temp_dir.join("server.toml")),
-            shutdown: CancellationToken::new(),
-        };
+        let mut config = test_server_config(
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
+            "https://monitor.example.com".to_string(),
+            registry_path.clone(),
+            temp_dir.join("history.sqlite3"),
+            temp_dir.join("snapshot.json"),
+        );
+        config.readonly_auth = None;
+        config.ws = test_ws_config(32, 8);
+        config.stale_after_secs = 20;
+        config.ping_interval_secs = 10;
+        config.ignored_filesystems = Vec::new();
+        let state = AppState::test_fixture(config.into(), Arc::new(temp_dir.join("server.toml")))
+            .await
+            .expect("state fixture should build");
         let app: Router = Router::new()
             .route("/", get(index))
             .route_layer(from_fn(set_protected_response_headers))

@@ -5,18 +5,18 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
-use futures::{SinkExt, StreamExt};
+use futures::SinkExt;
 use tokio::sync::{Barrier, mpsc, watch};
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::{AgentCredential, AgentWorkload, LOAD_TEST_TIMEOUT_SECS, TestSocket};
 use crate::history::HistoryStore;
 use crate::state::SharedState;
+use crate::test_support::{fake_snapshot_at, synthetic_identity, wait_for_authenticated_notice};
 use nodelite_proto::{
-    DiskUsage, HelloMessage, LoadAverage, MemoryUsage, MetricsMessage, NetworkCounters,
-    NodeIdentity, NodeSnapshot, NodeStatus, WireMessage,
+    HelloMessage, MetricsMessage, NodeIdentity, NodeSnapshot, NodeStatus, WireMessage,
 };
 
 pub(super) async fn run_fake_agent(
@@ -52,60 +52,17 @@ pub(super) async fn run_fake_agent_session(
 }
 
 pub(super) fn fake_identity(credential: &AgentCredential) -> NodeIdentity {
-    NodeIdentity {
-        node_id: credential.node_id.clone(),
-        node_label: credential.node_label.clone(),
-        hostname: format!("{}.example.internal", credential.node_id),
-        os: "Linux".to_string(),
-        kernel_version: Some("6.8.0-load-test".to_string()),
-        cpu_model: Some("Rust Hypervisor".to_string()),
-        cpu_cores: 4,
-        agent_version: "load-test".to_string(),
-        boot_time: Some(Utc::now()),
-        tags: vec!["load-test".to_string()],
-    }
+    synthetic_identity(
+        &credential.node_id,
+        &credential.node_label,
+        "load-test",
+        Some("6.8.0-load-test"),
+        "load-test",
+    )
 }
 
 pub(super) fn fake_snapshot(uptime_secs: u64) -> NodeSnapshot {
     fake_snapshot_at(uptime_secs, Utc::now())
-}
-
-pub(super) fn fake_snapshot_at(
-    uptime_secs: u64,
-    collected_at: chrono::DateTime<Utc>,
-) -> NodeSnapshot {
-    NodeSnapshot {
-        collected_at,
-        cpu_usage_percent: 12.5 + (uptime_secs % 7) as f64,
-        load: LoadAverage {
-            one: 0.3,
-            five: 0.4,
-            fifteen: 0.5,
-        },
-        memory: MemoryUsage {
-            total_bytes: 4 * 1024 * 1024 * 1024,
-            used_bytes: 1536 * 1024 * 1024,
-            available_bytes: 2560 * 1024 * 1024,
-            swap_total_bytes: 1024 * 1024 * 1024,
-            swap_used_bytes: 64 * 1024 * 1024,
-        },
-        uptime_secs,
-        disks: vec![DiskUsage {
-            device: "/dev/vda".to_string(),
-            mount_point: "/".to_string(),
-            fs_type: "ext4".to_string(),
-            total_bytes: 80 * 1024 * 1024 * 1024,
-            available_bytes: 40 * 1024 * 1024 * 1024,
-            used_bytes: 40 * 1024 * 1024 * 1024,
-            used_percent: 50.0,
-        }],
-        network: NetworkCounters {
-            total_rx_bytes: 512 * 1024 * uptime_secs,
-            total_tx_bytes: 256 * 1024 * uptime_secs,
-            rx_bytes_per_sec: Some(32_768.0 + uptime_secs as f64),
-            tx_bytes_per_sec: Some(16_384.0 + uptime_secs as f64),
-        },
-    }
 }
 
 pub(super) async fn wait_for_final_snapshots(
@@ -243,7 +200,12 @@ async fn connect_authenticated_fake_agent(
         identity: fake_identity(credential),
     });
     send_wire_message(&mut socket, &hello).await?;
-    wait_for_authenticated_notice(&mut socket, &credential.node_id).await?;
+    wait_for_authenticated_notice(
+        &mut socket,
+        &credential.node_id,
+        Duration::from_secs(LOAD_TEST_TIMEOUT_SECS),
+    )
+    .await?;
     ready_tx
         .send(credential.node_id.clone())
         .map_err(|_| anyhow!("ready channel closed"))?;
@@ -266,54 +228,6 @@ async fn send_metrics_workload(
         }
     }
     Ok(())
-}
-
-async fn wait_for_authenticated_notice(socket: &mut TestSocket, node_id: &str) -> Result<()> {
-    timeout(Duration::from_secs(LOAD_TEST_TIMEOUT_SECS), async {
-        loop {
-            let Some(frame) = socket.next().await else {
-                bail!("socket closed before authenticated notice");
-            };
-            match frame.context("receive websocket frame")? {
-                Message::Text(text) => {
-                    let message: WireMessage =
-                        serde_json::from_str(&text).context("decode wire message")?;
-                    match message {
-                        WireMessage::ServerNotice(notice) if notice.message == "authenticated" => {
-                            return Ok(());
-                        }
-                        WireMessage::Ping(ping) => {
-                            send_wire_message(
-                                socket,
-                                &WireMessage::Pong(nodelite_proto::PongMessage {
-                                    nonce: ping.nonce,
-                                }),
-                            )
-                            .await?;
-                        }
-                        WireMessage::ServerNotice(notice)
-                            if notice.level == nodelite_proto::NoticeLevel::Error =>
-                        {
-                            bail!("server rejected {node_id}: {}", notice.message);
-                        }
-                        _ => {}
-                    }
-                }
-                Message::Ping(payload) => {
-                    socket
-                        .send(Message::Pong(payload))
-                        .await
-                        .context("reply websocket ping")?;
-                }
-                Message::Close(frame) => {
-                    bail!("socket closed before auth: {frame:?}");
-                }
-                _ => {}
-            }
-        }
-    })
-    .await
-    .context("timed out waiting for authenticated notice")?
 }
 
 async fn send_wire_message(socket: &mut TestSocket, message: &WireMessage) -> Result<()> {

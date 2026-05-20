@@ -1,6 +1,5 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
@@ -8,24 +7,18 @@ use axum::Router;
 use axum::middleware::from_fn_with_state;
 use axum::routing::get;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tower_http::trace::TraceLayer;
 
 use super::AgentCredential;
-use crate::AppState;
-use crate::ServerReadiness;
-use crate::admission::{InstallAdmissionConfig, InstallAdmissionController, WsAdmissionController};
-use crate::agent_logs::AgentLogStore;
-use crate::auth::{ReadonlyRouteAuth, TwoFactorSessions};
 use crate::handlers::{
     node_history, node_logs, node_status, nodes, overview, require_readonly_auth,
 };
 use crate::history::HistoryStore;
-use crate::registry::{IssueNodeRequest, NodeRegistry, issue_node};
+use crate::registry::{IssueNodeRequest, issue_node};
 use crate::state::SharedState;
+use crate::test_support::{test_server_config, test_ws_config};
 use crate::ws::ws_handler;
-use nodelite_proto::{ReadonlyAuthConfig, ServerConfig, WsConfig};
 
 pub(super) struct TestServer {
     pub(super) addr: SocketAddr,
@@ -75,70 +68,22 @@ impl TestServer {
             });
         }
 
-        let config = Arc::new(ServerConfig {
-            listen: addr,
-            public_base_url: format!("http://{addr}"),
-            insecure_allow_http: false,
-            readonly_auth: Some(ReadonlyAuthConfig {
-                username: "viewer".to_string(),
-                password: "secret".to_string(),
-                enable_2fa: false,
-                totp_secret: None,
-            }),
-            ws: WsConfig {
-                max_total_connections: node_count.saturating_add(32),
-                max_connections_per_ip: node_count.saturating_add(32),
-                auth_fail_window_secs: 300,
-                auth_fail_max_attempts: 12,
-                auth_block_secs: 900,
-            },
-            node_registry_path: registry_path.clone(),
-            history_db_path: history_path.clone(),
-            snapshot_path: snapshot_path.clone(),
-            stale_after_secs: 20,
-            ping_interval_secs: 60,
-            max_message_bytes: 64 * 1024,
-            refresh_interval_secs: 5,
-            ignored_filesystems: vec!["tmpfs".to_string(), "devtmpfs".to_string()],
-            agent_release_base_url: None,
-            agent_release_sha256_x86_64: None,
-            agent_release_sha256_aarch64: None,
-            hello_timeout_secs: 10,
-            max_outstanding_pings: 32,
-            insecure_transport_warn_interval_secs: 900,
-            max_sanitized_disks: 64,
-            max_sanitized_string_bytes: 256,
-            metric_anomaly_session_limit: 5,
-            sqlite_busy_timeout_secs: 5,
-        });
-
-        let history = HistoryStore::new(history_path, 5);
-        history.initialize().await;
-        let readiness = ServerReadiness::new(history.is_available());
-        let state = AppState {
-            history: history.clone(),
-            agent_logs: AgentLogStore::new(),
-            install_admission: InstallAdmissionController::new(InstallAdmissionConfig {
-                auth_fail_window_secs: config.ws.auth_fail_window_secs,
-                auth_fail_max_attempts: config.ws.auth_fail_max_attempts,
-                auth_block_secs: config.ws.auth_block_secs,
-            }),
-            verify_2fa_admission: InstallAdmissionController::new(InstallAdmissionConfig {
-                auth_fail_window_secs: config.ws.auth_fail_window_secs,
-                auth_fail_max_attempts: config.ws.auth_fail_max_attempts,
-                auth_block_secs: config.ws.auth_block_secs,
-            }),
-            readiness,
-            registry: NodeRegistry::load(&registry_path).await?,
-            shared: SharedState::new(config.clone()),
-            ws_admission: WsAdmissionController::new(&config.ws),
-            readonly_auth: Arc::new(RwLock::new(ReadonlyRouteAuth::from_config(
-                config.readonly_auth.clone(),
-            ))),
-            two_factor_sessions: TwoFactorSessions::new(),
-            config_path: Arc::new(temp_dir.join("server.toml")),
-            shutdown: tokio_util::sync::CancellationToken::new(),
-        };
+        let mut config = test_server_config(
+            addr,
+            format!("http://{addr}"),
+            registry_path,
+            history_path,
+            snapshot_path,
+        );
+        config.ws = test_ws_config(node_count.saturating_add(32), node_count.saturating_add(32));
+        config.stale_after_secs = 20;
+        let config = std::sync::Arc::new(config);
+        let state = crate::AppState::test_fixture(
+            config,
+            std::sync::Arc::new(temp_dir.join("server.toml")),
+        )
+        .await?;
+        let history = state.history.clone();
 
         let shared = state.shared.clone();
         let protected_routes = Router::new()
