@@ -8,6 +8,7 @@ use tracing::error;
 
 use crate::AppState;
 use crate::audit::{AuditEventType, AuditLogError, AuditQuery};
+use crate::history::HistoryError;
 use nodelite_proto::AgentLogEntry;
 
 const DEFAULT_HISTORY_WINDOW_HOURS: u64 = 24;
@@ -234,7 +235,17 @@ pub(crate) async fn node_history(
     match history_result {
         Ok(points) => Json(points).into_response(),
         Err(error) => {
-            error!(node_id = %node_id, error = ?error, "failed to query node history");
+            let history_error = match &error {
+                HistoryError::ConnectionNotInitialized => "connection_not_initialized",
+                HistoryError::Query(_) => "query_failed",
+                HistoryError::TaskFailed(_) => "task_failed",
+            };
+            error!(
+                node_id = %node_id,
+                history_error,
+                error = ?error,
+                "failed to query node history"
+            );
             (StatusCode::SERVICE_UNAVAILABLE, "history store unavailable").into_response()
         }
     }

@@ -5,6 +5,8 @@
 //!   并跟踪每个 pending 的连续失败次数和已经被消费过的 TOTP `time_step`;
 //! - 顶层 helper(`verify_totp_step` / `cookie_*` / 常量时间比较)只暴露纯输入
 //!   输出的小函数,使路由层不需要关心 TOTP / Base32 / cookie 字符串细节。
+//! - 对外暴露的 session token 生成接口统一返回 [`AuthSessionError`],避免把
+//!   裸 `anyhow::Error` 扩散到 handler 与测试调用方。
 //!
 //! 这一层不直接持有 `AppState`,避免 main.rs 的总状态结构反过来产生循环依赖。
 //! 调用方在 handler 里把 `AppState` 拆成所需字段后再调用本模块。
@@ -13,7 +15,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
 use axum::extract::Request;
 use axum::http::{HeaderMap, header};
 use base64::Engine;
@@ -306,6 +307,32 @@ pub struct Verify2FAError {
     pub error: String,
 }
 
+pub type AuthSessionResult<T> = std::result::Result<T, AuthSessionError>;
+
+/// pending / authenticated session token 生成时对外暴露的稳定错误边界。
+#[derive(Debug)]
+pub enum AuthSessionError {
+    Entropy(getrandom::Error),
+}
+
+impl std::fmt::Display for AuthSessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Entropy(_) => {
+                f.write_str("failed to gather secure random bytes for session token")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AuthSessionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Entropy(error) => Some(error),
+        }
+    }
+}
+
 impl TwoFactorSessions {
     pub fn new() -> Self {
         Self {
@@ -313,7 +340,7 @@ impl TwoFactorSessions {
         }
     }
 
-    pub fn create_pending(&self) -> Result<String> {
+    pub fn create_pending(&self) -> AuthSessionResult<String> {
         let token = generate_session_token()?;
         let expires_at = Instant::now() + Duration::from_secs(TWO_FACTOR_PENDING_SECS);
         let mut store = lock_mutex(&self.inner);
@@ -374,7 +401,7 @@ impl TwoFactorSessions {
         store.used_totp_steps.contains_key(&step)
     }
 
-    pub fn create_authenticated(&self) -> Result<String> {
+    pub fn create_authenticated(&self) -> AuthSessionResult<String> {
         let token = generate_session_token()?;
         let expires_at = Instant::now() + Duration::from_secs(TWO_FACTOR_AUTH_SECS);
         let mut store = lock_mutex(&self.inner);
@@ -421,9 +448,9 @@ fn lock_mutex(mutex: &Mutex<TwoFactorSessionStore>) -> MutexGuard<'_, TwoFactorS
     })
 }
 
-fn generate_session_token() -> Result<String> {
+fn generate_session_token() -> AuthSessionResult<String> {
     let mut bytes = [0_u8; 32];
-    fill_random(&mut bytes).context("failed to gather secure random bytes")?;
+    fill_random(&mut bytes).map_err(AuthSessionError::Entropy)?;
     Ok(hex_encode(&bytes))
 }
 

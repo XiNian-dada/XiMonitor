@@ -8,6 +8,8 @@
 //! - 自降级:数据库初始化失败时不阻断服务,而是把 `available=false`,实时视图照常运行;
 //! - 背压:bounded channel + try_send,溢出时记日志并自增 dropped 计数,
 //!   而不是反压实时心跳路径(实时数据比历史趋势更重要)。
+//! - 对外暴露的查询入口统一返回 [`HistoryError`],让 handler 可以按类别区分
+//!   "任务调度失败" / "连接未初始化" / "查询本身失败",而不是匹配错误字符串。
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -16,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, TimeZone, Utc};
 use nodelite_proto::{
     DEFAULT_HISTORY_RETENTION_HOURS, DEFAULT_HISTORY_WRITE_INTERVAL_SECS, HistoryPoint, NodeStatus,
@@ -67,6 +69,35 @@ const HISTORY_QUERY_SQL: &str = r#"
         ORDER BY recorded_at ASC
         LIMIT ?5
         "#;
+
+pub type HistoryResult<T> = std::result::Result<T, HistoryError>;
+
+/// 历史查询路径对外暴露的稳定错误边界。
+#[derive(Debug)]
+pub enum HistoryError {
+    ConnectionNotInitialized,
+    Query(anyhow::Error),
+    TaskFailed(anyhow::Error),
+}
+
+impl std::fmt::Display for HistoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ConnectionNotInitialized => f.write_str("history connection not initialized"),
+            Self::Query(_) => f.write_str("history query failed"),
+            Self::TaskFailed(_) => f.write_str("history query task failed"),
+        }
+    }
+}
+
+impl std::error::Error for HistoryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Query(error) | Self::TaskFailed(error) => Some(error.root_cause()),
+            Self::ConnectionNotInitialized => None,
+        }
+    }
+}
 
 /// 对外暴露的历史存储句柄,可被低成本克隆给多个异步任务。
 #[derive(Clone)]
@@ -255,7 +286,7 @@ impl HistoryStore {
         node_id: &str,
         window_hours: u64,
         max_points: usize,
-    ) -> Result<Vec<HistoryPoint>> {
+    ) -> HistoryResult<Vec<HistoryPoint>> {
         if !self.is_available() {
             return Ok(Vec::new());
         }
@@ -269,12 +300,13 @@ impl HistoryStore {
         tokio::task::spawn_blocking(move || {
             let guard = connection_arc.blocking_lock();
             let Some(ref connection) = *guard else {
-                anyhow::bail!("history connection not initialized");
+                return Err(HistoryError::ConnectionNotInitialized);
             };
             query_history(connection, &node_id, since, clamped_max_points)
+                .map_err(HistoryError::Query)
         })
         .await
-        .context("history query task failed")?
+        .map_err(|error| HistoryError::TaskFailed(anyhow!("history query task failed: {error}")))?
     }
 
     /// 按"任意时间区间"查询历史记录。超出保留期或反向区间会被自动裁剪。
@@ -284,7 +316,7 @@ impl HistoryStore {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
         max_points: usize,
-    ) -> Result<Vec<HistoryPoint>> {
+    ) -> HistoryResult<Vec<HistoryPoint>> {
         if !self.is_available() {
             return Ok(Vec::new());
         }
@@ -304,7 +336,7 @@ impl HistoryStore {
         tokio::task::spawn_blocking(move || {
             let guard = connection_arc.blocking_lock();
             let Some(ref connection) = *guard else {
-                anyhow::bail!("history connection not initialized");
+                return Err(HistoryError::ConnectionNotInitialized);
             };
             query_history_between(
                 connection,
@@ -313,9 +345,12 @@ impl HistoryStore {
                 clamped_end,
                 clamped_max_points,
             )
+            .map_err(HistoryError::Query)
         })
         .await
-        .context("history range query task failed")?
+        .map_err(|error| {
+            HistoryError::TaskFailed(anyhow!("history range query task failed: {error}"))
+        })?
     }
 
     /// 清理已经不在注册表中的节点节流状态,避免长期运行时条目只增不减。
@@ -744,7 +779,7 @@ fn is_sqlite_busy(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use chrono::{Duration, Utc};
@@ -755,8 +790,9 @@ mod tests {
     use tokio::runtime::Runtime;
 
     use super::{
-        HISTORY_QUERY_SQL, HistoryStore, SQLITE_BUSY_MAX_RETRIES, build_history_point,
-        initialize_database, query_history_between, sqlite_busy_retry_delay, write_history_point,
+        HISTORY_QUERY_SQL, HistoryError, HistoryStore, SQLITE_BUSY_MAX_RETRIES,
+        build_history_point, initialize_database, query_history_between, sqlite_busy_retry_delay,
+        write_history_point,
     };
 
     #[test]
@@ -883,6 +919,33 @@ mod tests {
             assert!(guard.contains_key("jp-01"));
             assert!(guard.contains_key("us-01"));
         });
+    }
+
+    #[tokio::test]
+    async fn query_history_reports_connection_not_initialized() {
+        let store = HistoryStore::new(PathBuf::from("./data/history.sqlite3"), 5);
+        store.available.store(true, Ordering::Relaxed);
+
+        let error = store
+            .query_history("hk-01", 1, 60)
+            .await
+            .expect_err("query should surface typed connection error");
+
+        assert!(matches!(error, HistoryError::ConnectionNotInitialized));
+    }
+
+    #[tokio::test]
+    async fn query_history_range_reports_connection_not_initialized() {
+        let store = HistoryStore::new(PathBuf::from("./data/history.sqlite3"), 5);
+        store.available.store(true, Ordering::Relaxed);
+
+        let now = Utc::now();
+        let error = store
+            .query_history_range("hk-01", now - Duration::hours(1), now, 60)
+            .await
+            .expect_err("range query should surface typed connection error");
+
+        assert!(matches!(error, HistoryError::ConnectionNotInitialized));
     }
 
     #[test]
