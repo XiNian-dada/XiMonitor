@@ -6,7 +6,6 @@ target/tarpaulin/
 .DS_Store
 /data
 /dist
-/docs
-SECURITY.md
+AGENTS.md
 
 .claude/

@@ -146,27 +146,49 @@ random_hex() {
   od -An -N"$bytes" -tx1 /dev/urandom | tr -d ' \n'
 }
 
-# 生成符合密码策略的强密码（至少12字符，包含大小写字母、数字、特殊字符）
+# 从给定字符集中随机抽取一个字符。故意只依赖 `od` / `awk`,避免 GNU `shuf`
+# 这类在 BusyBox/Alpine 上不一定存在的工具。
+random_char_from_set() {
+  charset="$1"
+  charset_length="$(printf '%s' "$charset" | awk '{ print length }')"
+  [ "$charset_length" -gt 0 ] || fail "random_char_from_set requires a non-empty charset"
+  random_index="$(( $(od -An -N2 -tu2 /dev/urandom | tr -d ' \n') % charset_length + 1 ))"
+  printf '%s' "$charset" | awk -v pos="$random_index" 'BEGIN { ORS="" } { print substr($0, pos, 1) }'
+}
+
+append_random_chars() {
+  charset="$1"
+  count="$2"
+  result=""
+
+  while [ "$count" -gt 0 ]; do
+    result="${result}$(random_char_from_set "$charset")"
+    count=$((count - 1))
+  done
+
+  printf '%s' "$result"
+}
+
+# 生成符合密码策略的强密码（至少12字符，包含大小写字母、数字、特殊字符）。
+# 字符类型按交错顺序拼接,避免依赖额外的"洗牌"工具,同时仍保留足够熵。
 generate_strong_password() {
-  # 定义字符集
   uppercase="ABCDEFGHJKLMNPQRSTUVWXYZ"  # 去除易混淆的 I O
   lowercase="abcdefghijkmnopqrstuvwxyz"  # 去除易混淆的 l
   digits="23456789"  # 去除易混淆的 0 1
   special="!@#\$%^&*-_=+"
-
-  # 确保至少包含每种字符类型
-  password=""
-  password="${password}$(echo "$uppercase" | fold -w1 | shuf -n2 | tr -d '\n')"
-  password="${password}$(echo "$lowercase" | fold -w1 | shuf -n2 | tr -d '\n')"
-  password="${password}$(echo "$digits" | fold -w1 | shuf -n2 | tr -d '\n')"
-  password="${password}$(echo "$special" | fold -w1 | shuf -n2 | tr -d '\n')"
-
-  # 添加更多随机字符达到16位
   all_chars="${uppercase}${lowercase}${digits}${special}"
-  password="${password}$(echo "$all_chars" | fold -w1 | shuf -n8 | tr -d '\n')"
 
-  # 打乱顺序
-  echo "$password" | fold -w1 | shuf | tr -d '\n'
+  password=""
+  password="${password}$(append_random_chars "$uppercase" 1)"
+  password="${password}$(append_random_chars "$lowercase" 1)"
+  password="${password}$(append_random_chars "$digits" 1)"
+  password="${password}$(append_random_chars "$special" 1)"
+  password="${password}$(append_random_chars "$lowercase" 1)"
+  password="${password}$(append_random_chars "$uppercase" 1)"
+  password="${password}$(append_random_chars "$special" 1)"
+  password="${password}$(append_random_chars "$digits" 1)"
+  password="${password}$(append_random_chars "$all_chars" 8)"
+  printf '%s' "$password"
 }
 
 # 在 [20000, 40000) 区间内随机一个端口,降低默认监听端口被占用的概率。
