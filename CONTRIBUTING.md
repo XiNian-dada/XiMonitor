@@ -34,7 +34,7 @@
 #### 开发环境搭建
 
 **前置要求：**
-- Rust 1.75+ (`rustup update`)
+- Rust stable（请以 CI 当前使用的 stable 工具链为准；由于 workspace 使用 `edition = "2024"`，不要使用过旧的 Rust 版本）
 - SQLite 3.x
 - Git
 
