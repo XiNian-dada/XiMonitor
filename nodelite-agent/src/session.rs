@@ -27,8 +27,13 @@ pub(crate) const MAX_PENDING_AGENT_LOGS: usize = 256;
 const MAX_AGENT_LOG_BATCH: usize = 32;
 /// 单条日志消息的最大字节数,避免异常长错误串撑爆 WebSocket 消息。
 const MAX_AGENT_LOG_MESSAGE_BYTES: usize = 240;
-/// Token 过期后的重连间隔。
-const TOKEN_EXPIRED_RECONNECT_DELAY: Duration = Duration::from_secs(3600);
+const TOKEN_EXPIRED_SHORT_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(30),
+    Duration::from_secs(120),
+    Duration::from_secs(300),
+];
+/// Token 连续确认过期后,退回长间隔以避免长期热重试。
+const TOKEN_EXPIRED_LONG_RECONNECT_DELAY: Duration = Duration::from_secs(3600);
 
 #[derive(Debug)]
 pub(crate) struct SessionError {
@@ -92,7 +97,8 @@ pub(crate) async fn run_forever(
     config_path: PathBuf,
     mut log_buffer: AgentLogBuffer,
 ) -> Result<()> {
-    let mut attempt = 0_u32;
+    let mut reconnect_attempt = 0_u32;
+    let mut token_expired_attempt = 0_u32;
 
     loop {
         let next = async {
@@ -106,17 +112,20 @@ pub(crate) async fn run_forever(
             .await
             {
                 Ok(()) => {
-                    attempt = 0;
+                    reconnect_attempt = 0;
+                    token_expired_attempt = 0;
                 }
                 Err(error) => {
                     if error.established_session {
-                        attempt = 0;
+                        reconnect_attempt = 0;
+                        token_expired_attempt = 0;
                     }
                     let delay = if error.token_expired {
-                        attempt = 0;
-                        TOKEN_EXPIRED_RECONNECT_DELAY
+                        reconnect_attempt = 0;
+                        token_expired_reconnect_delay(token_expired_attempt)
                     } else {
-                        reconnect_delay(attempt)
+                        token_expired_attempt = 0;
+                        reconnect_delay(reconnect_attempt)
                     };
                     let reason = error.source.to_string();
                     let level = if error.token_expired {
@@ -128,23 +137,22 @@ pub(crate) async fn run_forever(
                     };
                     log_buffer.push(
                         level,
-                        format!(
-                            "session ended: {}; retrying in {}s",
-                            reason,
-                            delay.as_secs()
-                        ),
+                        retry_log_message(&error, &reason, delay, token_expired_attempt),
                     );
                     warn!(
                         server = %config.server,
                         delay_secs = delay.as_secs(),
                         established_session = error.established_session,
                         token_expired = error.token_expired,
+                        token_expired_attempt,
                         error = ?error.source,
                         "agent session ended; retrying after backoff"
                     );
                     sleep(delay).await;
-                    if !error.token_expired {
-                        attempt = attempt.saturating_add(1);
+                    if error.token_expired {
+                        token_expired_attempt = token_expired_attempt.saturating_add(1);
+                    } else {
+                        reconnect_attempt = reconnect_attempt.saturating_add(1);
                     }
                 }
             }
@@ -409,6 +417,41 @@ fn reconnect_delay(attempt: u32) -> Duration {
     Duration::from_millis(floor_ms.saturating_add(jitter_ms))
 }
 
+fn token_expired_reconnect_delay(attempt: u32) -> Duration {
+    TOKEN_EXPIRED_SHORT_RETRY_DELAYS
+        .get(attempt as usize)
+        .copied()
+        .unwrap_or(TOKEN_EXPIRED_LONG_RECONNECT_DELAY)
+}
+
+fn retry_log_message(
+    error: &SessionError,
+    reason: &str,
+    delay: Duration,
+    token_expired_attempt: u32,
+) -> String {
+    if !error.token_expired {
+        let context = if error.established_session {
+            "session ended after authentication"
+        } else {
+            "session ended before authentication"
+        };
+        return format!("{context}: {reason}; retrying in {}s", delay.as_secs());
+    }
+
+    if (token_expired_attempt as usize) < TOKEN_EXPIRED_SHORT_RETRY_DELAYS.len() {
+        return format!(
+            "confirmed token expiry: {reason}; probing for a rotated token in {}s",
+            delay.as_secs()
+        );
+    }
+
+    format!(
+        "confirmed token expiry: {reason}; operator token rotation likely required; retrying in {}s",
+        delay.as_secs()
+    )
+}
+
 fn sample_random_u64() -> Option<u64> {
     let mut buf = [0_u8; 8];
     fill_random(&mut buf).ok()?;
@@ -422,7 +465,10 @@ mod tests {
 
     use nodelite_proto::NoticeLevel;
 
-    use super::{AgentLogBuffer, MAX_PENDING_AGENT_LOGS, reconnect_delay};
+    use super::{
+        AgentLogBuffer, MAX_PENDING_AGENT_LOGS, SessionError, reconnect_delay, retry_log_message,
+        token_expired_reconnect_delay,
+    };
 
     #[test]
     fn reconnect_delay_is_within_jitter_window_and_disperses() {
@@ -452,6 +498,59 @@ mod tests {
                 "attempt {attempt}: 32 samples all identical, jitter not active",
             );
         }
+    }
+
+    #[test]
+    fn token_expired_reconnect_delay_uses_short_probes_before_long_sleep() {
+        let cases = [
+            (0, Duration::from_secs(30)),
+            (1, Duration::from_secs(120)),
+            (2, Duration::from_secs(300)),
+            (3, Duration::from_secs(3600)),
+            (1024, Duration::from_secs(3600)),
+        ];
+        for (attempt, expected) in cases {
+            assert_eq!(token_expired_reconnect_delay(attempt), expected);
+        }
+    }
+
+    #[test]
+    fn retry_log_message_distinguishes_confirmed_token_expiry() {
+        let token_error = SessionError {
+            established_session: false,
+            token_expired: true,
+            source: anyhow::anyhow!("agent token expired"),
+        };
+        let short_message = retry_log_message(
+            &token_error,
+            "agent token expired",
+            Duration::from_secs(30),
+            0,
+        );
+        assert!(short_message.contains("confirmed token expiry"));
+        assert!(short_message.contains("probing for a rotated token"));
+
+        let long_message = retry_log_message(
+            &token_error,
+            "agent token expired",
+            Duration::from_secs(3600),
+            3,
+        );
+        assert!(long_message.contains("operator token rotation likely required"));
+
+        let refresh_error = SessionError {
+            established_session: true,
+            token_expired: false,
+            source: anyhow::anyhow!("failed to send token refresh response"),
+        };
+        let refresh_message = retry_log_message(
+            &refresh_error,
+            "failed to send token refresh response",
+            Duration::from_secs(5),
+            0,
+        );
+        assert!(refresh_message.contains("session ended after authentication"));
+        assert!(!refresh_message.contains("confirmed token expiry"));
     }
 
     #[test]
