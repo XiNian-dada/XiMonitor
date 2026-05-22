@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use nodelite_proto::{
     DiskUsage, LoadAverage, MemoryUsage, NetworkCounters, NodeSnapshot, ServerConfig, percentage,
+    truncate_string_to_byte_boundary,
 };
 
 /// 历史采样中允许的最大磁盘条目数,防止恶意 Agent 制造海量条目。
@@ -200,9 +201,9 @@ fn sanitize_disk_usage(mut disk: DiskUsage, report: &mut SanitizationReport) -> 
     let original_device_len = disk.device.len();
     let original_mount_len = disk.mount_point.len();
     let original_fs_len = disk.fs_type.len();
-    truncate_to_byte_boundary(&mut disk.device, MAX_SANITIZED_STRING_BYTES);
-    truncate_to_byte_boundary(&mut disk.mount_point, MAX_SANITIZED_STRING_BYTES);
-    truncate_to_byte_boundary(&mut disk.fs_type, MAX_SANITIZED_STRING_BYTES);
+    truncate_string_to_byte_boundary(&mut disk.device, MAX_SANITIZED_STRING_BYTES);
+    truncate_string_to_byte_boundary(&mut disk.mount_point, MAX_SANITIZED_STRING_BYTES);
+    truncate_string_to_byte_boundary(&mut disk.fs_type, MAX_SANITIZED_STRING_BYTES);
     if disk.device.len() != original_device_len
         || disk.mount_point.len() != original_mount_len
         || disk.fs_type.len() != original_fs_len
@@ -261,23 +262,6 @@ fn sanitize_optional_rate(value: Option<f64>, max: f64, counter: &mut u32) -> Op
     })
 }
 
-/// 把字符串截到不超过 `max_bytes` 字节,且必须落在 UTF-8 字符边界上。
-pub(crate) fn truncate_to_byte_boundary(value: &mut String, max_bytes: usize) {
-    if value.len() <= max_bytes {
-        return;
-    }
-
-    for cutoff in (max_bytes.saturating_sub(3)..=max_bytes).rev() {
-        if value.is_char_boundary(cutoff) {
-            value.truncate(cutoff);
-            return;
-        }
-    }
-
-    // UTF-8 code points are at most 4 bytes, so this is only a defensive fallback.
-    value.clear();
-}
-
 #[cfg(test)]
 mod tests {
     use nodelite_proto::{DiskUsage, MemoryUsage};
@@ -286,7 +270,7 @@ mod tests {
     use super::{
         MAX_SANITIZED_RATE_BYTES_PER_SEC, MAX_SANITIZED_STRING_BYTES, SanitizationReport,
         sanitize_disk_usage, sanitize_memory_usage, sanitize_non_negative_f64,
-        sanitize_optional_rate, truncate_to_byte_boundary,
+        sanitize_optional_rate,
     };
 
     proptest! {
@@ -298,7 +282,7 @@ mod tests {
             max_bytes in 0usize..512,
         ) {
             let mut value = original.clone();
-            truncate_to_byte_boundary(&mut value, max_bytes);
+            nodelite_proto::truncate_string_to_byte_boundary(&mut value, max_bytes);
 
             prop_assert!(value.len() <= max_bytes);
             prop_assert!(original.starts_with(&value));

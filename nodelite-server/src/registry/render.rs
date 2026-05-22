@@ -1,5 +1,7 @@
 use url::Url;
 
+use crate::encoding::shell_quote;
+
 use super::{RegisteredNode, RegistryError, RegistryResult};
 
 /// 从 `public_base_url` 推导 Agent 应连接的 WebSocket URL(http → ws,https → wss)。
@@ -162,10 +164,6 @@ pub fn render_agent_config(
         content.push_str(&format!("tags = [{tags}]\n"));
     }
     Ok(content)
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn toml_escape(value: &str) -> String {

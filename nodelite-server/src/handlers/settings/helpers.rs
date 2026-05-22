@@ -5,6 +5,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use getrandom::fill as fill_random;
 
+use crate::encoding::shell_quote;
+
 use super::SettingsActionResponse;
 
 pub(super) fn settings_json_error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -150,10 +152,6 @@ pub(super) fn otpauth_uri(username: &str, secret: &str) -> String {
 
 pub(super) fn server_build_version() -> &'static str {
     option_env!("NODELITE_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn percent_encode_component(value: &str) -> String {

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use nodelite_proto::AgentLogEntry;
+use nodelite_proto::{AgentLogEntry, truncate_to_byte_boundary};
 use tokio::sync::RwLock;
 
 const MAX_LOGS_PER_NODE: usize = 200;
@@ -114,27 +114,12 @@ fn sanitize_entry(mut entry: AgentLogEntry) -> Option<AgentLogEntry> {
     Some(entry)
 }
 
-fn truncate_to_byte_boundary(value: &str, max_bytes: usize) -> &str {
-    if value.len() <= max_bytes {
-        return value;
-    }
-
-    let mut end = max_bytes;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    &value[..end]
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
     use nodelite_proto::NoticeLevel;
 
-    use super::{
-        AgentLogEntry, AgentLogStore, MAX_BATCH_ENTRIES, MAX_LOGS_PER_NODE,
-        truncate_to_byte_boundary,
-    };
+    use super::{AgentLogEntry, AgentLogStore, MAX_BATCH_ENTRIES, MAX_LOGS_PER_NODE};
 
     #[tokio::test]
     async fn record_entries_caps_per_node_and_surfaces_drops() {
@@ -209,7 +194,7 @@ mod tests {
     #[test]
     fn truncate_to_byte_boundary_preserves_utf8() {
         let value = "日志-abcdef";
-        let truncated = truncate_to_byte_boundary(value, 5);
+        let truncated = nodelite_proto::truncate_to_byte_boundary(value, 5);
         assert!(truncated.is_char_boundary(truncated.len()));
         assert_eq!(truncated, "日");
     }

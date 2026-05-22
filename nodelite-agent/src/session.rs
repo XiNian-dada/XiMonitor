@@ -9,6 +9,7 @@ use getrandom::fill as fill_random;
 use nodelite_proto::{
     AgentConfig, AgentLogEntry, AgentLogsMessage, HelloMessage, MetricsMessage, NoticeLevel,
     PingMessage, PongMessage, ServerNoticeMessage, WIRE_PROTOCOL_VERSION, WireMessage,
+    truncate_to_byte_boundary,
 };
 use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
 use tokio_tungstenite::connect_async_with_config;
@@ -414,18 +415,6 @@ fn sample_random_u64() -> Option<u64> {
     Some(u64::from_le_bytes(buf))
 }
 
-fn truncate_to_byte_boundary(value: &str, max_bytes: usize) -> &str {
-    if value.len() <= max_bytes {
-        return value;
-    }
-
-    let mut end = max_bytes;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    &value[..end]
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -433,9 +422,7 @@ mod tests {
 
     use nodelite_proto::NoticeLevel;
 
-    use super::{
-        AgentLogBuffer, MAX_PENDING_AGENT_LOGS, reconnect_delay, truncate_to_byte_boundary,
-    };
+    use super::{AgentLogBuffer, MAX_PENDING_AGENT_LOGS, reconnect_delay};
 
     #[test]
     fn reconnect_delay_is_within_jitter_window_and_disperses() {
@@ -483,6 +470,9 @@ mod tests {
 
     #[test]
     fn truncate_to_byte_boundary_preserves_utf8() {
-        assert_eq!(truncate_to_byte_boundary("日志abcdef", 4), "日");
+        assert_eq!(
+            nodelite_proto::truncate_to_byte_boundary("日志abcdef", 4),
+            "日"
+        );
     }
 }

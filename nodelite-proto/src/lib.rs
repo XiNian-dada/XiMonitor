@@ -8,6 +8,7 @@ pub mod config;
 pub mod message;
 pub mod model;
 pub mod netutil;
+pub mod text;
 pub mod validation;
 
 pub use config::{
@@ -28,6 +29,7 @@ pub use model::{
     NodeStatus, OverviewData, percentage,
 };
 pub use netutil::{host_is_local, uses_insecure_remote_url};
+pub use text::{truncate_string_to_byte_boundary, truncate_to_byte_boundary};
 pub use validation::{
     ValidationError, normalize_string_list, validate_identifier, validate_non_empty,
     validate_tag_list,

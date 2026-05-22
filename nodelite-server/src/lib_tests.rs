@@ -35,8 +35,7 @@ use crate::registry::{IssueNodeRequest, issue_node};
 use crate::sanitize::{
     MAX_SANITIZED_DISKS, MAX_SANITIZED_LOAD, MAX_SANITIZED_RATE_BYTES_PER_SEC,
     MAX_SANITIZED_STRING_BYTES, METRIC_ANOMALY_SESSION_LIMIT, SanitizationReport,
-    sanitize_snapshot, should_disconnect_for_metric_anomalies, truncate_to_byte_boundary,
-    update_metric_anomaly_window,
+    sanitize_snapshot, should_disconnect_for_metric_anomalies, update_metric_anomaly_window,
 };
 use crate::test_support::{TEST_BASIC_AUTH_HEADER, test_server_config, test_ws_config};
 use crate::ui::index_page_csp;
@@ -1165,14 +1164,14 @@ fn sanitize_snapshot_deduplicates_repeated_disk_devices() {
 fn truncate_to_byte_boundary_respects_char_boundary() {
     // "中" 在 UTF-8 中占 3 字节;cutoff = 7 必须回退到 6 字节边界。
     let mut value = "中".repeat(100);
-    truncate_to_byte_boundary(&mut value, 7);
+    nodelite_proto::truncate_string_to_byte_boundary(&mut value, 7);
     assert!(value.len() <= 7);
     assert!(value.is_char_boundary(value.len()));
     assert!(value.chars().all(|ch| ch == '中'));
 
     // 已经在限内的字符串保持不变。
     let mut short = "abc".to_string();
-    truncate_to_byte_boundary(&mut short, 16);
+    nodelite_proto::truncate_string_to_byte_boundary(&mut short, 16);
     assert_eq!(short, "abc");
 }
 
@@ -1187,7 +1186,7 @@ fn truncate_to_byte_boundary_handles_utf8_widths_with_bounded_scan() {
 
     for (input, max_bytes, expected) in cases {
         let mut value = input.to_string();
-        truncate_to_byte_boundary(&mut value, max_bytes);
+        nodelite_proto::truncate_string_to_byte_boundary(&mut value, max_bytes);
 
         assert_eq!(value, expected);
         assert!(value.len() <= max_bytes);
