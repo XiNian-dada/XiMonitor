@@ -1,8 +1,12 @@
+use std::convert::Infallible;
+
 use axum::Json;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{TimeZone, Utc};
+use futures::stream;
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
@@ -103,18 +107,22 @@ pub(crate) async fn nodes(State(state): State<AppState>) -> Response {
 
 /// Prometheus 指标导出,供外部监控抓取全局概览与节点在线状态。
 pub(crate) async fn metrics(State(state): State<AppState>) -> Response {
-    let mut body = state.shared.metrics_text(&state.readiness).await.to_vec();
+    let cached_body = state.shared.metrics_text(&state.readiness).await;
     let writer_metrics = render_writer_metrics(WriterMetrics {
         history_dropped_writes: state.history.dropped_writes(),
         audit_dropped_writes: state.audit_log.dropped_writes(),
         audit_write_failures: state.audit_log.write_failures(),
         session_control_queue_full_total: state.shared.session_control_queue_full_total(),
     });
-    body.extend_from_slice(writer_metrics.as_bytes());
     let api_cache_metrics = render_api_cache_metrics(state.shared.api_cache_metrics());
-    body.extend_from_slice(api_cache_metrics.as_bytes());
     let agent_log_metrics = render_agent_log_metrics(state.agent_logs.stats().await);
-    body.extend_from_slice(agent_log_metrics.as_bytes());
+    let dynamic_body = Bytes::from(format!(
+        "{writer_metrics}{api_cache_metrics}{agent_log_metrics}"
+    ));
+    let body = Body::from_stream(stream::iter([
+        Ok::<Bytes, Infallible>(cached_body),
+        Ok(dynamic_body),
+    ]));
     (
         [
             (header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE),
