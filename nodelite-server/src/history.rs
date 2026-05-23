@@ -191,13 +191,25 @@ impl HistoryStore {
     /// 节流通过 + channel 有空闲槽位时立即返回;否则静默 drop 并自增计数。
     /// 调用方(WebSocket 心跳路径)永远不会因为 SQLite I/O 而被阻塞。
     pub async fn record_status(&self, status: &NodeStatus) {
+        self.record_status_with_builder(status, build_history_point)
+            .await;
+    }
+
+    async fn record_status_with_builder<F>(&self, status: &NodeStatus, build_point: F)
+    where
+        F: FnOnce(&NodeStatus) -> Option<HistoryPoint>,
+    {
         if !self.is_available() {
             return;
         }
 
-        let Some(point) = build_history_point(status) else {
+        let initial_recorded_at = status.last_seen.unwrap_or_else(Utc::now);
+        if self
+            .is_throttled(status.identity.node_id.as_str(), initial_recorded_at)
+            .await
+        {
             return;
-        };
+        }
 
         // 把样本推给 writer task。try_send 在 channel 满时立即失败,这里宁可丢一条样本
         // 也不要让 WS 处理路径被反压;丢弃由 dropped_writes 计数提示运维。
@@ -209,6 +221,9 @@ impl HistoryStore {
             return;
         };
 
+        let Some(point) = build_point(status) else {
+            return;
+        };
         let node_id = point.node_id.clone();
         let recorded_at = point.recorded_at;
         let mut throttle = self.last_written_at.lock().await;
@@ -241,6 +256,20 @@ impl HistoryStore {
                 self.available.store(false, Ordering::Relaxed);
             }
         }
+    }
+
+    async fn is_throttled(&self, node_id: &str, recorded_at: DateTime<Utc>) -> bool {
+        let throttle = self.last_written_at.lock().await;
+        let Some(previous) = throttle.get(node_id) else {
+            return false;
+        };
+        let Ok(elapsed) = recorded_at
+            .signed_duration_since(previous.to_owned())
+            .to_std()
+        else {
+            return true;
+        };
+        elapsed < Duration::from_secs(DEFAULT_HISTORY_WRITE_INTERVAL_SECS)
     }
 
     /// 关停:drop sender → writer task 自动 drain 残留 batch 后退出,
@@ -350,7 +379,7 @@ impl HistoryStore {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use chrono::{Duration, Utc};
@@ -735,6 +764,44 @@ mod tests {
         assert!(
             !guard.contains_key("hk-01"),
             "dropped writes must not advance the throttle window"
+        );
+
+        let _ = std::fs::remove_file(&db_path);
+        if let Some(parent) = db_path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+
+    #[tokio::test]
+    async fn record_status_skips_point_build_when_throttled() {
+        let db_path = temp_history_db_path("throttled-builder");
+        let store = HistoryStore::new(db_path.clone(), 5);
+        store.available.store(true, Ordering::Relaxed);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<HistoryPoint>(1);
+        {
+            let mut guard = store.writer_tx.write().await;
+            *guard = Some(tx);
+        }
+
+        let now = Utc::now();
+        {
+            let mut guard = store.last_written_at.lock().await;
+            guard.insert("hk-01".to_string(), now);
+        }
+
+        let builds = AtomicUsize::new(0);
+        let status = fake_status_for("hk-01", now);
+        store
+            .record_status_with_builder(&status, |_| {
+                builds.fetch_add(1, Ordering::Relaxed);
+                build_history_point(&status)
+            })
+            .await;
+
+        assert_eq!(
+            builds.load(Ordering::Relaxed),
+            0,
+            "throttled samples should return before building a HistoryPoint"
         );
 
         let _ = std::fs::remove_file(&db_path);
