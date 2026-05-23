@@ -11,6 +11,7 @@
 mod overview;
 mod registry;
 mod session_control;
+mod sqlite_wal;
 mod view_cache;
 
 use std::sync::Arc;
@@ -26,10 +27,11 @@ use self::registry::Registry;
 pub(crate) use self::session_control::{
     SessionCommand, SessionCommandError, SessionControlHandle, SessionRefreshReply,
 };
+use self::sqlite_wal::SqliteWalCheckpointObserver;
 use self::view_cache::{ApiBodyKind, ReadinessSnapshot, ViewCache};
 use crate::ServerReadiness;
 use crate::handlers::metrics_exporter::{
-    ApiCacheMetrics, WsMessageMetrics, render_prometheus_metrics,
+    ApiCacheMetrics, SqliteWalCheckpointMetrics, WsMessageMetrics, render_prometheus_metrics,
 };
 
 /// 共享状态的对外句柄,可以低成本地克隆给每个异步任务。
@@ -43,6 +45,7 @@ pub struct SharedState {
     api_nodes_cache_build_lock: Arc<Mutex<()>>,
     api_overview_cache_build_lock: Arc<Mutex<()>>,
     metrics_cache_build_lock: Arc<Mutex<()>>,
+    sqlite_wal_checkpoint: SqliteWalCheckpointObserver,
     api_nodes_cache_hits: Arc<AtomicU64>,
     api_nodes_cache_misses: Arc<AtomicU64>,
     api_nodes_body_bytes: Arc<AtomicU64>,
@@ -64,7 +67,7 @@ pub struct SharedState {
 impl SharedState {
     pub fn new(config: Arc<ServerConfig>) -> Self {
         Self {
-            config,
+            config: Arc::clone(&config),
             registry: Arc::new(RwLock::new(Registry::default())),
             next_session_id: Arc::new(AtomicU64::new(1)),
             view_revision: Arc::new(AtomicU64::new(1)),
@@ -72,6 +75,7 @@ impl SharedState {
             api_nodes_cache_build_lock: Arc::new(Mutex::new(())),
             api_overview_cache_build_lock: Arc::new(Mutex::new(())),
             metrics_cache_build_lock: Arc::new(Mutex::new(())),
+            sqlite_wal_checkpoint: SqliteWalCheckpointObserver::new(Arc::clone(&config)),
             api_nodes_cache_hits: Arc::new(AtomicU64::new(0)),
             api_nodes_cache_misses: Arc::new(AtomicU64::new(0)),
             api_nodes_body_bytes: Arc::new(AtomicU64::new(0)),
@@ -266,6 +270,10 @@ impl SharedState {
                 .ws_messages_refresh_token_request_total
                 .load(Ordering::Relaxed),
         }
+    }
+
+    pub(crate) async fn sqlite_wal_checkpoint_metrics(&self) -> SqliteWalCheckpointMetrics {
+        self.sqlite_wal_checkpoint.metrics().await
     }
 
     /// 返回缓存后的 `/metrics` 响应体。

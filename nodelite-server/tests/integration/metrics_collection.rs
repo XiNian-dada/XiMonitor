@@ -76,6 +76,9 @@ async fn prometheus_metrics_export_reflects_current_nodes() -> Result<()> {
     assert!(metrics.contains("nodelite_api_body_bytes{kind=\"metrics\"}"));
     assert!(metrics.contains("nodelite_metrics_response_body_bytes"));
     assert!(metrics.contains("nodelite_sqlite_file_bytes{kind=\"history_db\"}"));
+    assert!(metrics.contains("nodelite_sqlite_wal_checkpoint_observed{database=\"history\"}"));
+    assert!(metrics.contains("nodelite_sqlite_wal_checkpoint_active{database=\"history\"}"));
+    assert!(metrics.contains("nodelite_sqlite_wal_checkpoint_pages{database=\"history\""));
     assert!(metrics.contains("nodelite_registry_nodes"));
     assert!(metrics.contains("nodelite_ws_messages_total{type=\"metrics\"}"));
     assert!(
