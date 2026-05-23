@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::{ConnectInfo, State};
-use axum::http::{HeaderMap, Request, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, header};
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use chrono::Utc;
@@ -294,6 +294,82 @@ fn install_endpoints_disable_caching() {
             Some(&header::HeaderValue::from_static("no-cache")),
         );
 
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    });
+}
+
+#[test]
+fn router_compresses_text_assets_but_not_webp() {
+    let runtime = Runtime::new().expect("runtime should build");
+    runtime.block_on(async {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic enough")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("nodelite-compression-test-{unique}"));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let registry_path = temp_dir.join("server.json");
+        let mut config = test_server_config(
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
+            "https://monitor.example.com".to_string(),
+            registry_path,
+            temp_dir.join("history.sqlite3"),
+            temp_dir.join("snapshot.json"),
+        );
+        config.readonly_auth = None;
+        config.ws = test_ws_config(32, 8);
+        let state = AppState::test_fixture(config.into(), Arc::new(temp_dir.join("server.toml")))
+            .await
+            .expect("state fixture should build");
+        let app = crate::startup::build_router(state.clone());
+
+        for path in ["/", "/assets/ui-i18n.json", "/metrics"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(header::ACCEPT_ENCODING, "br, gzip")
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("response should be produced");
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert!(
+                response
+                    .headers()
+                    .get(header::CONTENT_ENCODING)
+                    .is_some_and(|value| value == "br" || value == "gzip"),
+                "{path} should be compressed",
+            );
+        }
+
+        let webp_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/brand-logo-dark.webp")
+                    .header(header::ACCEPT_ENCODING, "br, gzip")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("response should be produced");
+        assert_eq!(webp_response.status(), StatusCode::OK);
+        assert_eq!(
+            webp_response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("image/webp")),
+        );
+        assert!(
+            webp_response
+                .headers()
+                .get(header::CONTENT_ENCODING)
+                .is_none(),
+            "WebP assets should not be recompressed",
+        );
+
+        state.history.shutdown().await;
+        state.audit_log.shutdown().await;
         let _ = std::fs::remove_dir_all(&temp_dir);
     });
 }

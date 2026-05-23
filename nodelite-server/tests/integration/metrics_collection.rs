@@ -70,6 +70,14 @@ async fn prometheus_metrics_export_reflects_current_nodes() -> Result<()> {
     assert!(metrics.contains("nodelite_node_cpu_usage_ratio"));
     assert!(metrics.contains("nodelite_node_network_bytes_total"));
     assert!(metrics.contains("nodelite_network_rate_bytes_per_second{direction=\"rx\"}"));
+    assert!(metrics.contains("nodelite_history_queue_depth"));
+    assert!(metrics.contains("nodelite_audit_queue_depth"));
+    assert!(metrics.contains("nodelite_view_cache_hits_total{kind=\"metrics\"}"));
+    assert!(metrics.contains("nodelite_api_body_bytes{kind=\"metrics\"}"));
+    assert!(metrics.contains("nodelite_metrics_response_body_bytes"));
+    assert!(metrics.contains("nodelite_sqlite_file_bytes{kind=\"history_db\"}"));
+    assert!(metrics.contains("nodelite_registry_nodes"));
+    assert!(metrics.contains("nodelite_ws_messages_total{type=\"metrics\"}"));
     assert!(
         metrics.contains("nodelite_node_info{node_id=\"itest-metrics-02\",node_label=\"Integration Metrics 02\",hostname=\"itest-metrics-02.example.internal\",os=\"Linux\",agent_version=\"integration-test\"} 1")
     );

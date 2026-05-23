@@ -271,6 +271,16 @@ impl AuditLog {
         self.write_failures.load(Ordering::Relaxed)
     }
 
+    pub(crate) async fn writer_queue_metrics(&self) -> (u64, u64) {
+        let guard = self.writer_tx.read().await;
+        let Some(tx) = guard.as_ref() else {
+            return (0, 0);
+        };
+        let capacity = tx.max_capacity();
+        let depth = capacity.saturating_sub(tx.capacity());
+        (depth as u64, capacity as u64)
+    }
+
     pub async fn query(&self, query: AuditQuery) -> Result<Vec<AuditEvent>, AuditLogError> {
         if !self.config.enabled {
             return Err(AuditLogError::Disabled);

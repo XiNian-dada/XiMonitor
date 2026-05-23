@@ -16,6 +16,7 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
@@ -261,7 +262,16 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .merge(public_routes)
         .merge(protected_routes)
         .with_state(state)
+        .layer(response_compression_layer())
         .layer(TraceLayer::new_for_http())
+}
+
+/// 对文本型 UI/API 响应启用 gzip/br,同时沿用 tower-http 默认规则跳过 image/*。
+///
+/// `/metrics` 是 text/plain,会随客户端 `Accept-Encoding` 被压缩;WebP logo 属于
+/// image/*,不会被二次压缩。
+pub(crate) fn response_compression_layer() -> CompressionLayer {
+    CompressionLayer::new().no_deflate().no_zstd()
 }
 
 /// 统一给受保护的 UI / API 响应补齐安全头,避免每个 handler 重复手写。

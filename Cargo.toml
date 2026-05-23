@@ -34,7 +34,7 @@ tokio-tungstenite = "0.29"
 tokio-util = "0.7"
 toml = "0.9"
 toml_edit = "0.22"
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2.5"

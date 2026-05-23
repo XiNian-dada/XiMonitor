@@ -14,9 +14,10 @@ pub(super) struct ResourceSnapshot {
 
 impl ResourceSnapshot {
     pub(super) async fn capture(server: &TestServer) -> Result<Self> {
+        let (history_queue_depth, _) = server.history.writer_queue_metrics().await;
         Ok(Self {
             rss_bytes: current_rss_bytes()?,
-            history_queue_depth: server.history.writer_queue_depth().await,
+            history_queue_depth: history_queue_depth as usize,
             history_dropped_writes: server.history.dropped_writes(),
             history_artifacts: server.history_artifact_bytes().await?,
         })

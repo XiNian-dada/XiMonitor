@@ -1,15 +1,21 @@
+use std::convert::Infallible;
+use std::path::{Path, PathBuf};
+
 use axum::Json;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{TimeZone, Utc};
+use futures::stream;
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
 use crate::AppState;
 use crate::audit::{AuditEventType, AuditLogError, AuditQuery};
 use crate::handlers::metrics_exporter::{
-    WriterMetrics, render_agent_log_metrics, render_api_cache_metrics, render_writer_metrics,
+    RuntimeMetrics, WriterMetrics, render_agent_log_metrics, render_api_cache_metrics,
+    render_metrics_response_body_bytes, render_runtime_metrics, render_writer_metrics,
 };
 use crate::history::HistoryError;
 use nodelite_proto::AgentLogEntry;
@@ -103,18 +109,47 @@ pub(crate) async fn nodes(State(state): State<AppState>) -> Response {
 
 /// Prometheus 指标导出,供外部监控抓取全局概览与节点在线状态。
 pub(crate) async fn metrics(State(state): State<AppState>) -> Response {
-    let mut body = state.shared.metrics_text(&state.readiness).await.to_vec();
+    let cached_body = state.shared.metrics_text(&state.readiness).await;
+    let (history_queue_depth, history_queue_capacity) = state.history.writer_queue_metrics().await;
+    let (audit_queue_depth, audit_queue_capacity) = state.audit_log.writer_queue_metrics().await;
     let writer_metrics = render_writer_metrics(WriterMetrics {
         history_dropped_writes: state.history.dropped_writes(),
+        history_queue_depth,
+        history_queue_capacity,
         audit_dropped_writes: state.audit_log.dropped_writes(),
+        audit_queue_depth,
+        audit_queue_capacity,
         audit_write_failures: state.audit_log.write_failures(),
         session_control_queue_full_total: state.shared.session_control_queue_full_total(),
     });
-    body.extend_from_slice(writer_metrics.as_bytes());
     let api_cache_metrics = render_api_cache_metrics(state.shared.api_cache_metrics());
-    body.extend_from_slice(api_cache_metrics.as_bytes());
     let agent_log_metrics = render_agent_log_metrics(state.agent_logs.stats().await);
-    body.extend_from_slice(agent_log_metrics.as_bytes());
+    let config = state.shared.config();
+    let (history_db_bytes, history_wal_bytes, history_shm_bytes) =
+        sqlite_artifact_sizes(config.history_db_path.as_path()).await;
+    let (audit_db_bytes, audit_wal_bytes, audit_shm_bytes) =
+        sqlite_artifact_sizes(config.audit.db_path.as_path()).await;
+    let registry_entries = state.registry.count().await as u64;
+    let runtime_metrics = render_runtime_metrics(RuntimeMetrics {
+        process_resident_memory_bytes: process_resident_memory_bytes(),
+        history_db_bytes,
+        history_wal_bytes,
+        history_shm_bytes,
+        audit_db_bytes,
+        audit_wal_bytes,
+        audit_shm_bytes,
+        registry_nodes: registry_entries,
+        registry_disk_entries_total: registry_entries,
+        ws_messages: state.shared.ws_message_metrics(),
+    });
+    let dynamic_body = metrics_dynamic_body(
+        cached_body.len(),
+        format!("{writer_metrics}{api_cache_metrics}{agent_log_metrics}{runtime_metrics}"),
+    );
+    let body = Body::from_stream(stream::iter([
+        Ok::<Bytes, Infallible>(cached_body),
+        Ok(dynamic_body),
+    ]));
     (
         [
             (header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE),
@@ -124,6 +159,82 @@ pub(crate) async fn metrics(State(state): State<AppState>) -> Response {
         body,
     )
         .into_response()
+}
+
+fn metrics_dynamic_body(cached_body_len: usize, mut dynamic_body: String) -> Bytes {
+    let mut response_body_bytes = cached_body_len.saturating_add(dynamic_body.len());
+    loop {
+        let response_metric = render_metrics_response_body_bytes(response_body_bytes as u64);
+        let next_response_body_bytes = cached_body_len
+            .saturating_add(dynamic_body.len())
+            .saturating_add(response_metric.len());
+        if next_response_body_bytes == response_body_bytes {
+            dynamic_body.push_str(&response_metric);
+            return Bytes::from(dynamic_body);
+        }
+        response_body_bytes = next_response_body_bytes;
+    }
+}
+
+async fn sqlite_artifact_sizes(path: &Path) -> (u64, u64, u64) {
+    let wal_path = sqlite_sidecar_path(path, "wal");
+    let shm_path = sqlite_sidecar_path(path, "shm");
+    (
+        file_len(path).await,
+        file_len(wal_path.as_path()).await,
+        file_len(shm_path.as_path()).await,
+    )
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut path = path.as_os_str().to_os_string();
+    path.push(format!("-{suffix}"));
+    path.into()
+}
+
+async fn file_len(path: &Path) -> u64 {
+    tokio::fs::metadata(path)
+        .await
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+}
+
+fn process_resident_memory_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let resident_pages = statm.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page_size <= 0 {
+            return None;
+        }
+        resident_pages.checked_mul(page_size as u64)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::zeroed();
+        let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+        let status = unsafe {
+            libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDTASKINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if status != size {
+            return None;
+        }
+        let info = unsafe { info.assume_init() };
+        Some(info.pti_resident_size)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
 }
 
 /// 审计日志查询接口。默认按时间倒序返回最近 100 条。

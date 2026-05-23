@@ -28,7 +28,9 @@ pub(crate) use self::session_control::{
 };
 use self::view_cache::{ApiBodyKind, ReadinessSnapshot, ViewCache};
 use crate::ServerReadiness;
-use crate::handlers::metrics_exporter::{ApiCacheMetrics, render_prometheus_metrics};
+use crate::handlers::metrics_exporter::{
+    ApiCacheMetrics, WsMessageMetrics, render_prometheus_metrics,
+};
 
 /// 共享状态的对外句柄,可以低成本地克隆给每个异步任务。
 #[derive(Clone)]
@@ -47,6 +49,13 @@ pub struct SharedState {
     api_overview_cache_hits: Arc<AtomicU64>,
     api_overview_cache_misses: Arc<AtomicU64>,
     api_overview_body_bytes: Arc<AtomicU64>,
+    metrics_cache_hits: Arc<AtomicU64>,
+    metrics_cache_misses: Arc<AtomicU64>,
+    metrics_body_bytes: Arc<AtomicU64>,
+    ws_messages_metrics_total: Arc<AtomicU64>,
+    ws_messages_agent_logs_total: Arc<AtomicU64>,
+    ws_messages_pong_total: Arc<AtomicU64>,
+    ws_messages_refresh_token_request_total: Arc<AtomicU64>,
     session_control_queue_full_total: Arc<AtomicU64>,
     #[cfg(test)]
     metrics_cache_builds: Arc<AtomicU64>,
@@ -69,6 +78,13 @@ impl SharedState {
             api_overview_cache_hits: Arc::new(AtomicU64::new(0)),
             api_overview_cache_misses: Arc::new(AtomicU64::new(0)),
             api_overview_body_bytes: Arc::new(AtomicU64::new(0)),
+            metrics_cache_hits: Arc::new(AtomicU64::new(0)),
+            metrics_cache_misses: Arc::new(AtomicU64::new(0)),
+            metrics_body_bytes: Arc::new(AtomicU64::new(0)),
+            ws_messages_metrics_total: Arc::new(AtomicU64::new(0)),
+            ws_messages_agent_logs_total: Arc::new(AtomicU64::new(0)),
+            ws_messages_pong_total: Arc::new(AtomicU64::new(0)),
+            ws_messages_refresh_token_request_total: Arc::new(AtomicU64::new(0)),
             session_control_queue_full_total: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             metrics_cache_builds: Arc::new(AtomicU64::new(0)),
@@ -216,6 +232,39 @@ impl SharedState {
             overview_hits: self.api_overview_cache_hits.load(Ordering::Relaxed),
             overview_misses: self.api_overview_cache_misses.load(Ordering::Relaxed),
             overview_body_bytes: self.api_overview_body_bytes.load(Ordering::Relaxed),
+            metrics_hits: self.metrics_cache_hits.load(Ordering::Relaxed),
+            metrics_misses: self.metrics_cache_misses.load(Ordering::Relaxed),
+            metrics_body_bytes: self.metrics_body_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(crate) fn record_ws_metrics_message(&self) {
+        self.ws_messages_metrics_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_ws_agent_logs_message(&self) {
+        self.ws_messages_agent_logs_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_ws_pong_message(&self) {
+        self.ws_messages_pong_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_ws_refresh_token_request_message(&self) {
+        self.ws_messages_refresh_token_request_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn ws_message_metrics(&self) -> WsMessageMetrics {
+        WsMessageMetrics {
+            metrics_total: self.ws_messages_metrics_total.load(Ordering::Relaxed),
+            agent_logs_total: self.ws_messages_agent_logs_total.load(Ordering::Relaxed),
+            pong_total: self.ws_messages_pong_total.load(Ordering::Relaxed),
+            refresh_token_request_total: self
+                .ws_messages_refresh_token_request_total
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -229,6 +278,7 @@ impl SharedState {
         {
             let cache = self.view_cache.lock().await;
             if let Some(body) = cache.metrics_body(revision, readiness_snapshot, max_age) {
+                self.record_metrics_cache_hit();
                 return body;
             }
         }
@@ -239,15 +289,20 @@ impl SharedState {
         {
             let cache = self.view_cache.lock().await;
             if let Some(body) = cache.metrics_body(revision, readiness_snapshot, max_age) {
+                self.record_metrics_cache_hit();
                 return body;
             }
         }
+
+        self.record_metrics_cache_miss();
 
         #[cfg(test)]
         self.metrics_cache_builds.fetch_add(1, Ordering::Relaxed);
 
         let (statuses, overview) = self.statuses_and_overview().await;
         let body = Bytes::from(render_prometheus_metrics(readiness, &statuses, &overview));
+        self.metrics_body_bytes
+            .store(body.len() as u64, Ordering::Relaxed);
 
         if self.view_revision.load(Ordering::Acquire) == revision {
             let mut cache = self.view_cache.lock().await;
@@ -356,6 +411,14 @@ impl SharedState {
             ApiBodyKind::Nodes => self.api_nodes_body_bytes.store(bytes, Ordering::Relaxed),
             ApiBodyKind::Overview => self.api_overview_body_bytes.store(bytes, Ordering::Relaxed),
         }
+    }
+
+    fn record_metrics_cache_hit(&self) {
+        self.metrics_cache_hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_metrics_cache_miss(&self) {
+        self.metrics_cache_misses.fetch_add(1, Ordering::Relaxed);
     }
 
     #[cfg(test)]

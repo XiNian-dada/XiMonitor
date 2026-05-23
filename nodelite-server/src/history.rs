@@ -195,13 +195,14 @@ impl HistoryStore {
         self.dropped_writes.load(Ordering::Relaxed)
     }
 
-    #[cfg(test)]
-    pub async fn writer_queue_depth(&self) -> usize {
+    pub(crate) async fn writer_queue_metrics(&self) -> (u64, u64) {
         let guard = self.writer_tx.read().await;
-        guard
-            .as_ref()
-            .map(|sender| sender.max_capacity().saturating_sub(sender.capacity()))
-            .unwrap_or(0)
+        let Some(tx) = guard.as_ref() else {
+            return (0, 0);
+        };
+        let capacity = tx.max_capacity();
+        let depth = capacity.saturating_sub(tx.capacity());
+        (depth as u64, capacity as u64)
     }
 
     /// 尝试把一次节点状态记录到历史表。

@@ -22,7 +22,11 @@ pub(crate) fn render_prometheus_metrics(
 #[derive(Clone, Copy)]
 pub(crate) struct WriterMetrics {
     pub(crate) history_dropped_writes: u64,
+    pub(crate) history_queue_depth: u64,
+    pub(crate) history_queue_capacity: u64,
     pub(crate) audit_dropped_writes: u64,
+    pub(crate) audit_queue_depth: u64,
+    pub(crate) audit_queue_capacity: u64,
     pub(crate) audit_write_failures: u64,
     pub(crate) session_control_queue_full_total: u64,
 }
@@ -35,11 +39,35 @@ pub(crate) fn render_writer_metrics(metrics: WriterMetrics) -> String {
         &[],
         metrics.history_dropped_writes,
     );
+    emitter.gauge(
+        "nodelite_history_queue_depth",
+        "Number of history samples waiting in the writer queue.",
+        &[],
+        metrics.history_queue_depth,
+    );
+    emitter.gauge(
+        "nodelite_history_queue_capacity",
+        "Maximum number of history samples accepted by the writer queue.",
+        &[],
+        metrics.history_queue_capacity,
+    );
     emitter.counter(
         "nodelite_audit_dropped_writes_total",
         "Number of audit events dropped because the writer queue was full.",
         &[],
         metrics.audit_dropped_writes,
+    );
+    emitter.gauge(
+        "nodelite_audit_queue_depth",
+        "Number of audit commands waiting in the writer queue.",
+        &[],
+        metrics.audit_queue_depth,
+    );
+    emitter.gauge(
+        "nodelite_audit_queue_capacity",
+        "Maximum number of audit commands accepted by the writer queue.",
+        &[],
+        metrics.audit_queue_capacity,
     );
     emitter.counter(
         "nodelite_audit_write_failures_total",
@@ -87,6 +115,9 @@ pub(crate) struct ApiCacheMetrics {
     pub(crate) overview_hits: u64,
     pub(crate) overview_misses: u64,
     pub(crate) overview_body_bytes: u64,
+    pub(crate) metrics_hits: u64,
+    pub(crate) metrics_misses: u64,
+    pub(crate) metrics_body_bytes: u64,
 }
 
 pub(crate) fn render_api_cache_metrics(metrics: ApiCacheMetrics) -> String {
@@ -103,6 +134,12 @@ pub(crate) fn render_api_cache_metrics(metrics: ApiCacheMetrics) -> String {
             metrics.overview_hits,
             metrics.overview_misses,
             metrics.overview_body_bytes,
+        ),
+        (
+            "metrics",
+            metrics.metrics_hits,
+            metrics.metrics_misses,
+            metrics.metrics_body_bytes,
         ),
     ] {
         emitter.counter(
@@ -123,7 +160,126 @@ pub(crate) fn render_api_cache_metrics(metrics: ApiCacheMetrics) -> String {
             &[("kind", kind)],
             body_bytes,
         );
+        emitter.counter(
+            "nodelite_view_cache_hits_total",
+            "Number of cached HTTP view response body hits.",
+            &[("kind", kind)],
+            hits,
+        );
+        emitter.counter(
+            "nodelite_view_cache_misses_total",
+            "Number of cached HTTP view response body misses.",
+            &[("kind", kind)],
+            misses,
+        );
     }
+    emitter.gauge(
+        "nodelite_metrics_body_bytes",
+        "Size in bytes of the most recently built cached base /metrics response body.",
+        &[],
+        metrics.metrics_body_bytes,
+    );
+    emitter.finish()
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct WsMessageMetrics {
+    pub(crate) metrics_total: u64,
+    pub(crate) agent_logs_total: u64,
+    pub(crate) pong_total: u64,
+    pub(crate) refresh_token_request_total: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RuntimeMetrics {
+    pub(crate) process_resident_memory_bytes: Option<u64>,
+    pub(crate) history_db_bytes: u64,
+    pub(crate) history_wal_bytes: u64,
+    pub(crate) history_shm_bytes: u64,
+    pub(crate) audit_db_bytes: u64,
+    pub(crate) audit_wal_bytes: u64,
+    pub(crate) audit_shm_bytes: u64,
+    pub(crate) registry_nodes: u64,
+    pub(crate) registry_disk_entries_total: u64,
+    pub(crate) ws_messages: WsMessageMetrics,
+}
+
+pub(crate) fn render_runtime_metrics(metrics: RuntimeMetrics) -> String {
+    let mut emitter = MetricEmitter::default();
+    if let Some(bytes) = metrics.process_resident_memory_bytes {
+        emitter.gauge(
+            "nodelite_process_resident_memory_bytes",
+            "Resident set size of the nodelite-server process.",
+            &[],
+            bytes,
+        );
+    }
+    for (kind, bytes) in [
+        ("history_db", metrics.history_db_bytes),
+        ("history_wal", metrics.history_wal_bytes),
+        ("history_shm", metrics.history_shm_bytes),
+        ("audit_db", metrics.audit_db_bytes),
+        ("audit_wal", metrics.audit_wal_bytes),
+        ("audit_shm", metrics.audit_shm_bytes),
+    ] {
+        emitter.gauge(
+            "nodelite_sqlite_file_bytes",
+            "Size in bytes of NodeLite SQLite database and journal artifacts.",
+            &[("kind", kind)],
+            bytes,
+        );
+    }
+    emitter.gauge(
+        "nodelite_history_db_bytes",
+        "Size in bytes of the history SQLite database file.",
+        &[],
+        metrics.history_db_bytes,
+    );
+    emitter.gauge(
+        "nodelite_history_wal_bytes",
+        "Size in bytes of the history SQLite WAL file.",
+        &[],
+        metrics.history_wal_bytes,
+    );
+    emitter.gauge(
+        "nodelite_registry_nodes",
+        "Number of registered nodes currently loaded in memory.",
+        &[],
+        metrics.registry_nodes,
+    );
+    emitter.gauge(
+        "nodelite_registry_disk_entries_total",
+        "Number of registered node entries observed from registry storage.",
+        &[],
+        metrics.registry_disk_entries_total,
+    );
+    for (kind, total) in [
+        ("metrics", metrics.ws_messages.metrics_total),
+        ("agent_logs", metrics.ws_messages.agent_logs_total),
+        ("pong", metrics.ws_messages.pong_total),
+        (
+            "refresh_token_request",
+            metrics.ws_messages.refresh_token_request_total,
+        ),
+    ] {
+        emitter.counter(
+            "nodelite_ws_messages_total",
+            "Number of authenticated WebSocket messages handled by type.",
+            &[("type", kind)],
+            total,
+        );
+    }
+    emitter.finish()
+}
+
+pub(crate) fn render_metrics_response_body_bytes(bytes: u64) -> String {
+    let mut emitter = MetricEmitter::default();
+    emitter.gauge(
+        "nodelite_metrics_response_body_bytes",
+        "Size in bytes of the /metrics response body returned to the scraper.",
+        &[],
+        bytes,
+    );
     emitter.finish()
 }
 
@@ -445,8 +601,9 @@ mod tests {
     use chrono::Utc;
 
     use super::{
-        ApiCacheMetrics, WriterMetrics, render_agent_log_metrics, render_api_cache_metrics,
-        render_prometheus_metrics, render_writer_metrics,
+        ApiCacheMetrics, RuntimeMetrics, WriterMetrics, WsMessageMetrics, render_agent_log_metrics,
+        render_api_cache_metrics, render_metrics_response_body_bytes, render_prometheus_metrics,
+        render_runtime_metrics, render_writer_metrics,
     };
     use crate::ServerReadiness;
     use crate::agent_logs::AgentLogStats;
@@ -544,15 +701,27 @@ mod tests {
     fn exporter_exposes_writer_counters() {
         let body = render_writer_metrics(WriterMetrics {
             history_dropped_writes: 3,
+            history_queue_depth: 17,
+            history_queue_capacity: 1024,
             audit_dropped_writes: 5,
+            audit_queue_depth: 19,
+            audit_queue_capacity: 256,
             audit_write_failures: 7,
             session_control_queue_full_total: 11,
         });
 
         assert!(body.contains("# TYPE nodelite_history_dropped_writes_total counter"));
         assert!(body.contains("nodelite_history_dropped_writes_total 3"));
+        assert!(body.contains("# TYPE nodelite_history_queue_depth gauge"));
+        assert!(body.contains("nodelite_history_queue_depth 17"));
+        assert!(body.contains("# TYPE nodelite_history_queue_capacity gauge"));
+        assert!(body.contains("nodelite_history_queue_capacity 1024"));
         assert!(body.contains("# TYPE nodelite_audit_dropped_writes_total counter"));
         assert!(body.contains("nodelite_audit_dropped_writes_total 5"));
+        assert!(body.contains("# TYPE nodelite_audit_queue_depth gauge"));
+        assert!(body.contains("nodelite_audit_queue_depth 19"));
+        assert!(body.contains("# TYPE nodelite_audit_queue_capacity gauge"));
+        assert!(body.contains("nodelite_audit_queue_capacity 256"));
         assert!(body.contains("# TYPE nodelite_audit_write_failures_total counter"));
         assert!(body.contains("nodelite_audit_write_failures_total 7"));
         assert!(body.contains("# TYPE nodelite_session_control_queue_full_total counter"));
@@ -586,17 +755,78 @@ mod tests {
             overview_hits: 13,
             overview_misses: 3,
             overview_body_bytes: 256,
+            metrics_hits: 17,
+            metrics_misses: 4,
+            metrics_body_bytes: 8192,
         });
 
         assert!(body.contains("# TYPE nodelite_api_cache_hits_total counter"));
         assert!(body.contains("nodelite_api_cache_hits_total{kind=\"nodes\"} 11"));
         assert!(body.contains("nodelite_api_cache_hits_total{kind=\"overview\"} 13"));
+        assert!(body.contains("nodelite_api_cache_hits_total{kind=\"metrics\"} 17"));
         assert!(body.contains("# TYPE nodelite_api_cache_misses_total counter"));
         assert!(body.contains("nodelite_api_cache_misses_total{kind=\"nodes\"} 2"));
         assert!(body.contains("nodelite_api_cache_misses_total{kind=\"overview\"} 3"));
+        assert!(body.contains("nodelite_api_cache_misses_total{kind=\"metrics\"} 4"));
         assert!(body.contains("# TYPE nodelite_api_body_bytes gauge"));
         assert!(body.contains("nodelite_api_body_bytes{kind=\"nodes\"} 4096"));
         assert!(body.contains("nodelite_api_body_bytes{kind=\"overview\"} 256"));
+        assert!(body.contains("nodelite_api_body_bytes{kind=\"metrics\"} 8192"));
+        assert!(body.contains("# TYPE nodelite_view_cache_hits_total counter"));
+        assert!(body.contains("nodelite_view_cache_hits_total{kind=\"metrics\"} 17"));
+        assert!(body.contains("# TYPE nodelite_view_cache_misses_total counter"));
+        assert!(body.contains("nodelite_view_cache_misses_total{kind=\"metrics\"} 4"));
+        assert!(body.contains("# TYPE nodelite_metrics_body_bytes gauge"));
+        assert!(body.contains("nodelite_metrics_body_bytes 8192"));
+    }
+
+    #[test]
+    fn exporter_exposes_runtime_observability_metrics() {
+        let body = render_runtime_metrics(RuntimeMetrics {
+            process_resident_memory_bytes: Some(12_345),
+            history_db_bytes: 4096,
+            history_wal_bytes: 1024,
+            history_shm_bytes: 512,
+            audit_db_bytes: 2048,
+            audit_wal_bytes: 256,
+            audit_shm_bytes: 128,
+            registry_nodes: 3,
+            registry_disk_entries_total: 3,
+            ws_messages: WsMessageMetrics {
+                metrics_total: 11,
+                agent_logs_total: 13,
+                pong_total: 17,
+                refresh_token_request_total: 19,
+            },
+        });
+
+        assert!(body.contains("# TYPE nodelite_process_resident_memory_bytes gauge"));
+        assert!(body.contains("nodelite_process_resident_memory_bytes 12345"));
+        assert!(body.contains("# TYPE nodelite_sqlite_file_bytes gauge"));
+        assert!(body.contains("nodelite_sqlite_file_bytes{kind=\"history_db\"} 4096"));
+        assert!(body.contains("nodelite_sqlite_file_bytes{kind=\"history_wal\"} 1024"));
+        assert!(body.contains("nodelite_sqlite_file_bytes{kind=\"audit_db\"} 2048"));
+        assert!(body.contains("# TYPE nodelite_history_db_bytes gauge"));
+        assert!(body.contains("nodelite_history_db_bytes 4096"));
+        assert!(body.contains("# TYPE nodelite_history_wal_bytes gauge"));
+        assert!(body.contains("nodelite_history_wal_bytes 1024"));
+        assert!(body.contains("# TYPE nodelite_registry_nodes gauge"));
+        assert!(body.contains("nodelite_registry_nodes 3"));
+        assert!(body.contains("# TYPE nodelite_registry_disk_entries_total gauge"));
+        assert!(body.contains("nodelite_registry_disk_entries_total 3"));
+        assert!(body.contains("# TYPE nodelite_ws_messages_total counter"));
+        assert!(body.contains("nodelite_ws_messages_total{type=\"metrics\"} 11"));
+        assert!(body.contains("nodelite_ws_messages_total{type=\"agent_logs\"} 13"));
+        assert!(body.contains("nodelite_ws_messages_total{type=\"pong\"} 17"));
+        assert!(body.contains("nodelite_ws_messages_total{type=\"refresh_token_request\"} 19"));
+    }
+
+    #[test]
+    fn exporter_exposes_metrics_response_body_size() {
+        let body = render_metrics_response_body_bytes(12_345);
+
+        assert!(body.contains("# TYPE nodelite_metrics_response_body_bytes gauge"));
+        assert!(body.contains("nodelite_metrics_response_body_bytes 12345"));
     }
 
     fn sample_statuses() -> Vec<NodeStatus> {

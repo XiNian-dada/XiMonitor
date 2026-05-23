@@ -157,15 +157,19 @@ async fn handle_wire_message(
 ) -> Result<LoopAction, super::ProtocolError> {
     match message {
         WireMessage::Metrics(MetricsMessage { snapshot }) => {
+            shared.record_ws_metrics_message();
             handle_metrics_message(state, shared, session, loop_state, snapshot).await
         }
         WireMessage::AgentLogs(AgentLogsMessage { entries }) => {
+            shared.record_ws_agent_logs_message();
             handle_agent_logs_message(state, session, entries).await
         }
         WireMessage::Pong(PongMessage { nonce }) => {
+            shared.record_ws_pong_message();
             handle_pong_message(shared, state, session, loop_state, nonce).await
         }
         WireMessage::RefreshTokenRequest(request) => {
+            shared.record_ws_refresh_token_request_message();
             handle_refresh_request(state, session, sender, request).await
         }
         WireMessage::Hello(_) => Err(super::ProtocolError::Client(

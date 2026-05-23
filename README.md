@@ -247,8 +247,16 @@ scrape_configs:
 常用运维指标:
 
 - `nodelite_history_dropped_writes_total`: 历史写入队列满时丢弃的历史点总数。
+- `nodelite_history_queue_depth` / `nodelite_history_queue_capacity`: 历史 writer 当前排队量与队列容量。
 - `nodelite_audit_dropped_writes_total`: 审计写入队列满时丢弃的审计事件总数。
+- `nodelite_audit_queue_depth` / `nodelite_audit_queue_capacity`: 审计 writer 当前排队量与队列容量。
 - `nodelite_audit_write_failures_total`: 审计 writer 入队或落库失败总数。
+- `nodelite_view_cache_hits_total{kind}` / `nodelite_view_cache_misses_total{kind}`: `overview`、`nodes`、`metrics` 视图响应体缓存命中与未命中次数。
+- `nodelite_api_body_bytes{kind}` / `nodelite_metrics_response_body_bytes`: 最近一次构建的 API、基础 `/metrics` 与最终 `/metrics` 响应体大小。
+- `nodelite_process_resident_memory_bytes`: Server 进程 RSS,用于定位常驻内存增长。
+- `nodelite_sqlite_file_bytes{kind}`: history/audit SQLite 主文件、WAL 与 SHM 文件大小。
+- `nodelite_registry_nodes` / `nodelite_registry_disk_entries_total`: 当前加载的注册节点数量。
+- `nodelite_ws_messages_total{type}`: 已认证 WebSocket 消息按类型累计计数。
 
 ## 测试覆盖率
 
