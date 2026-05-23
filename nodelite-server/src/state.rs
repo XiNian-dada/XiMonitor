@@ -65,6 +65,10 @@ impl SharedState {
         self.config.as_ref()
     }
 
+    pub(crate) fn view_revision(&self) -> u64 {
+        self.view_revision.load(Ordering::Acquire)
+    }
+
     /// 登记一个新的 WebSocket 会话并返回唯一的 `session_id`。
     /// 同一节点重连时会得到比上次更大的 ID,从而抢占老的会话。
     pub async fn register_node(&self, identity: NodeIdentity, remote_ip: Option<String>) -> u64 {

@@ -22,6 +22,11 @@ use crate::state::SharedState;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+#[derive(Debug, Default)]
+pub(crate) struct SnapshotPersistCheckpoint {
+    last_revision: Option<u64>,
+}
+
 /// 从磁盘读取上一次的快照文件并反序列化。
 pub async fn load_snapshot(path: &Path) -> Result<Vec<NodeStatus>> {
     let content = fs::read_to_string(path)
@@ -41,20 +46,41 @@ pub fn spawn_snapshot_persistor(
     let snapshot_path = Arc::new(snapshot_path);
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(15));
+        let mut checkpoint = SnapshotPersistCheckpoint::default();
         // 主机/进程被挂起恢复后,不要连续 burst 多次磁盘 IO;保持 15 s 节奏即可。
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = ticker.tick() => {
-                    let statuses = shared.list_statuses().await;
-                    if let Err(error) = persist_snapshot(snapshot_path.as_ref(), &statuses).await {
+                    if let Err(error) = persist_snapshot_if_changed(
+                        &shared,
+                        snapshot_path.as_ref(),
+                        &mut checkpoint,
+                    )
+                    .await {
                         warn!(error = ?error, path = %snapshot_path.display(), "failed to persist node snapshot");
                     }
                 }
             }
         }
     })
+}
+
+pub(crate) async fn persist_snapshot_if_changed(
+    shared: &SharedState,
+    path: &Path,
+    checkpoint: &mut SnapshotPersistCheckpoint,
+) -> Result<bool> {
+    let revision = shared.view_revision();
+    if checkpoint.last_revision == Some(revision) {
+        return Ok(false);
+    }
+
+    let statuses = shared.list_statuses().await;
+    persist_snapshot(path, &statuses).await?;
+    checkpoint.last_revision = Some(revision);
+    Ok(true)
 }
 
 /// 实际执行"写临时文件 → rename → 设权限"的步骤。
@@ -65,8 +91,7 @@ pub(crate) async fn persist_snapshot(path: &Path, statuses: &[NodeStatus]) -> Re
         create_private_dir_all_async(parent).await?;
     }
 
-    let payload =
-        serde_json::to_vec_pretty(statuses).context("failed to serialize node snapshot")?;
+    let payload = serde_json::to_vec(statuses).context("failed to serialize node snapshot")?;
     let temporary_path = temporary_snapshot_path(path);
     let temporary_path_for_write = temporary_path.clone();
     // 实际写盘的同步操作放到 spawn_blocking 里执行,避免阻塞异步线程池。
@@ -152,16 +177,110 @@ fn harden_snapshot_permissions(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use chrono::Utc;
     use nodelite_proto::{NodeIdentity, NodeStatus};
     use tokio::runtime::Runtime;
 
-    use super::persist_snapshot;
+    use super::{
+        SnapshotPersistCheckpoint, load_snapshot, persist_snapshot, persist_snapshot_if_changed,
+    };
+    use crate::state::SharedState;
+    use crate::test_support::{synthetic_identity, test_server_config};
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn snapshot_persistor_skips_unchanged_revision_and_writes_after_change() {
+        let unique = unique_suffix();
+        let temp_dir = std::env::temp_dir().join(format!("nodelite-snapshot-skip-test-{unique}"));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let snapshot_path = temp_dir.join("snapshot.json");
+        let config = test_server_config(
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)),
+            "http://127.0.0.1:0".to_string(),
+            temp_dir.join("server.json"),
+            temp_dir.join("history.sqlite3"),
+            snapshot_path.clone(),
+        );
+        let shared = SharedState::new(Arc::new(config));
+        let mut checkpoint = SnapshotPersistCheckpoint::default();
+
+        assert!(
+            persist_snapshot_if_changed(&shared, &snapshot_path, &mut checkpoint)
+                .await
+                .expect("initial snapshot should persist")
+        );
+        let initial_payload =
+            std::fs::read_to_string(&snapshot_path).expect("snapshot should be readable");
+
+        assert!(
+            !persist_snapshot_if_changed(&shared, &snapshot_path, &mut checkpoint)
+                .await
+                .expect("unchanged snapshot should skip")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&snapshot_path).expect("snapshot should be readable"),
+            initial_payload
+        );
+
+        shared
+            .register_node(
+                synthetic_identity("hk-01", "Hong Kong 01", "1.0.0", None, "edge"),
+                Some("198.51.100.24".to_string()),
+            )
+            .await;
+
+        assert!(
+            persist_snapshot_if_changed(&shared, &snapshot_path, &mut checkpoint)
+                .await
+                .expect("changed snapshot should persist")
+        );
+        let restored = load_snapshot(&snapshot_path)
+            .await
+            .expect("snapshot should restore");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].identity.node_id, "hk-01");
+
+        let _ = std::fs::remove_file(&snapshot_path);
+        let _ = std::fs::remove_dir(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn persisted_snapshot_uses_compact_json_and_still_restores() {
+        let unique = unique_suffix();
+        let temp_dir =
+            std::env::temp_dir().join(format!("nodelite-snapshot-compact-test-{unique}"));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let snapshot_path = temp_dir.join("snapshot.json");
+        let statuses = vec![sample_status()];
+
+        persist_snapshot(&snapshot_path, &statuses)
+            .await
+            .expect("snapshot should persist");
+
+        let compact_payload =
+            std::fs::read_to_string(&snapshot_path).expect("snapshot should be readable");
+        let pretty_payload =
+            serde_json::to_string_pretty(&statuses).expect("pretty json should serialize");
+        assert!(
+            compact_payload.len() < pretty_payload.len(),
+            "compact snapshot should be smaller than pretty JSON"
+        );
+
+        let restored = load_snapshot(&snapshot_path)
+            .await
+            .expect("snapshot should restore");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].identity.node_id, "hk-01");
+
+        let _ = std::fs::remove_file(&snapshot_path);
+        let _ = std::fs::remove_dir(&temp_dir);
+    }
 
     #[test]
     #[cfg(unix)]
@@ -177,25 +296,7 @@ mod tests {
             std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
             let data_dir = temp_dir.join("data");
             let snapshot_path = data_dir.join("snapshot.json");
-            let statuses = vec![NodeStatus {
-                identity: NodeIdentity {
-                    node_id: "hk-01".to_string(),
-                    node_label: "Hong Kong 01".to_string(),
-                    hostname: "hk-01.internal".to_string(),
-                    os: "Ubuntu".to_string(),
-                    kernel_version: None,
-                    cpu_model: None,
-                    cpu_cores: 2,
-                    agent_version: "1.0.6".to_string(),
-                    boot_time: None,
-                    tags: vec!["edge".to_string()],
-                },
-                remote_ip: Some("198.51.100.24".to_string()),
-                snapshot: None,
-                last_seen: Some(Utc::now()),
-                latency_ms: None,
-                online: false,
-            }];
+            let statuses = vec![sample_status()];
 
             persist_snapshot(&snapshot_path, &statuses)
                 .await
@@ -219,5 +320,34 @@ mod tests {
             let _ = std::fs::remove_dir(&data_dir);
             let _ = std::fs::remove_dir(&temp_dir);
         });
+    }
+
+    fn sample_status() -> NodeStatus {
+        NodeStatus {
+            identity: NodeIdentity {
+                node_id: "hk-01".to_string(),
+                node_label: "Hong Kong 01".to_string(),
+                hostname: "hk-01.internal".to_string(),
+                os: "Ubuntu".to_string(),
+                kernel_version: None,
+                cpu_model: None,
+                cpu_cores: 2,
+                agent_version: "1.0.6".to_string(),
+                boot_time: None,
+                tags: vec!["edge".to_string()],
+            },
+            remote_ip: Some("198.51.100.24".to_string()),
+            snapshot: None,
+            last_seen: Some(Utc::now()),
+            latency_ms: None,
+            online: false,
+        }
+    }
+
+    fn unique_suffix() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic enough")
+            .as_nanos()
     }
 }
