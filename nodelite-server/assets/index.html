@@ -1017,10 +1017,12 @@
       let activeTab = "overview";
       let latestSettings = null;
       let pendingTwoFactorSetup = null;
+      let nodeGridEl = null;
       const sparkHistory = new Map();
       const sparkHistoryFetchedAt = new Map();
       const sparkHistoryRetryAfter = new Map();
       const sparkHistoryInFlight = new Map();
+      const renderedNodeCards = new Map();
       const updateConsoleState = {
         open: false,
         offset: 0,
@@ -1535,10 +1537,12 @@
             sparkHistory.set(nodeId, normalizeHistory(body));
             sparkHistoryFetchedAt.set(nodeId, Date.now());
             sparkHistoryRetryAfter.delete(nodeId);
+            return true;
           })
           .catch((error) => {
             sparkHistoryRetryAfter.set(nodeId, Date.now() + HOME_SPARK_RETRY_MS);
             console.warn("failed to refresh node spark history", nodeId, error);
+            return false;
           })
           .finally(() => {
             if (sparkHistoryInFlight.get(nodeId) === promise) sparkHistoryInFlight.delete(nodeId);
@@ -1547,8 +1551,9 @@
         return promise;
       }
 
-      async function refreshSparkHistories(nodes, token) {
+      async function refreshSparkHistories(nodes) {
         const now = Date.now();
+        const refreshedNodeIds = new Set();
         const limited = nodes
           .slice(0, HOME_SPARK_NODE_LIMIT)
           .filter((node) => {
@@ -1562,10 +1567,11 @@
           while (nextIndex < limited.length) {
             const node = limited[nextIndex++];
             const nodeId = node.identity.node_id;
-            await sparkHistoryFetchPromise(nodeId);
+            if (await sparkHistoryFetchPromise(nodeId)) refreshedNodeIds.add(nodeId);
           }
         });
         await Promise.all(workers);
+        return refreshedNodeIds;
       }
 
       function scheduleSparkHistoryRefresh(nodes) {
@@ -1573,9 +1579,9 @@
         if (document.hidden || activeTab !== "overview") return;
         const token = ++sparkHistoryRefreshToken;
         const task = async () => {
-          await refreshSparkHistories(nodes, token);
+          const refreshedNodeIds = await refreshSparkHistories(nodes);
           if (token !== sparkHistoryRefreshToken) return;
-          renderNodes(latestNodes);
+          renderNodeSparks(latestNodes, refreshedNodeIds);
         };
 
         if (typeof window.requestIdleCallback === "function") {
@@ -1717,26 +1723,81 @@
         return cpuColor(value);
       }
 
+      function resetNodeCardCache() {
+        nodeGridEl = null;
+        renderedNodeCards.clear();
+      }
+
+      function ensureNodeGrid(root) {
+        if (nodeGridEl && nodeGridEl.parentElement === root) return nodeGridEl;
+        const existing = root.children.length === 1 && root.firstElementChild?.classList.contains("node-grid")
+          ? root.firstElementChild
+          : null;
+        const grid = existing || document.createElement("div");
+        grid.className = "node-grid";
+        if (!existing) root.replaceChildren(grid);
+        nodeGridEl = grid;
+        renderedNodeCards.clear();
+        return grid;
+      }
+
+      function nodeCardElementFromHtml(html) {
+        const template = document.createElement("template");
+        template.innerHTML = html.trim();
+        return template.content.firstElementChild;
+      }
+
       function renderNodes(nodes) {
         const root = document.getElementById("nodes");
         if (!nodes.length) {
+          resetNodeCardCache();
           root.innerHTML = `<div class="empty">${escapeHtml(t("index.no_agents"))}</div>`;
           return;
         }
-        root.innerHTML = `<div class="node-grid">${nodes.map((node) => nodeCardHtml(node)).join("")}</div>`;
+        const grid = ensureNodeGrid(root);
+        const liveNodeIds = new Set();
+        let cursor = grid.firstElementChild;
+
+        for (const node of nodes) {
+          const nodeId = node.identity.node_id;
+          const html = nodeCardHtml(node);
+          const cached = renderedNodeCards.get(nodeId);
+          const previousElement = cached?.element;
+          let element = previousElement;
+
+          if (!element || element.parentElement !== grid || cached.html !== html) {
+            element = nodeCardElementFromHtml(html);
+            if (previousElement?.parentElement === grid) {
+              previousElement.replaceWith(element);
+              if (cursor === previousElement) cursor = element;
+            }
+            renderedNodeCards.set(nodeId, { element, html });
+          }
+
+          liveNodeIds.add(nodeId);
+          if (element !== cursor) {
+            grid.insertBefore(element, cursor);
+          } else {
+            cursor = cursor.nextElementSibling;
+          }
+        }
+
+        for (const [nodeId, cached] of renderedNodeCards) {
+          if (liveNodeIds.has(nodeId)) continue;
+          cached.element.remove();
+          renderedNodeCards.delete(nodeId);
+        }
       }
 
       function nodeCardHtml(node) {
         const snapshot = node.snapshot || {};
-        const memory = snapshot.memory || {};
         const status = nodeStatusKey(node);
-        const sparkColor = sparklineColor(status);
-        const points = nodeSparkPoints(node);
         const cpu = snapshot.cpu_usage_percent;
         const load = snapshot.load?.one;
         const label = node.identity.node_label || node.identity.node_id;
         const id = node.identity.node_id;
         const title = label && label !== id ? `${label}: ${id}` : id;
+        const spark = nodeSparkMarkup(node);
         return `<a class="node-card" href="/nodes/${encodeURIComponent(node.identity.node_id)}">
           <div class="node-card-head">
             <div class="node-card-title">
@@ -1759,8 +1820,32 @@
               <div class="value ${cpu != null && cpu >= 80 ? "accent-red" : cpu != null && cpu >= 50 ? "accent-yellow" : "accent-green"}">${cpu == null ? "—" : `${cpu.toFixed(0)}%`}</div>
             </div>
           </div>
-          <div class="node-spark" style="color:${sparkColor}">${sparklineSvg(points, sparkColor)}</div>
+          <div class="node-spark" style="color:${spark.color}">${spark.html}</div>
         </a>`;
+      }
+
+      function nodeSparkMarkup(node) {
+        const status = nodeStatusKey(node);
+        const color = sparklineColor(status);
+        return {
+          color,
+          html: sparklineSvg(nodeSparkPoints(node), color)
+        };
+      }
+
+      function renderNodeSparks(nodes, nodeIds) {
+        if (!nodeIds || nodeIds.size === 0) return;
+        for (const node of nodes) {
+          const nodeId = node.identity.node_id;
+          if (!nodeIds.has(nodeId)) continue;
+          const cached = renderedNodeCards.get(nodeId);
+          const sparkEl = cached?.element?.querySelector(".node-spark");
+          if (!cached || !sparkEl) continue;
+          const spark = nodeSparkMarkup(node);
+          sparkEl.style.color = spark.color;
+          sparkEl.innerHTML = spark.html;
+          cached.html = nodeCardHtml(node);
+        }
       }
 
       async function loadSettings() {
@@ -2298,6 +2383,7 @@
             throw nodesResult.reason;
           }
         } catch (error) {
+          resetNodeCardCache();
           document.getElementById("nodes").innerHTML = `<div class="empty">${escapeHtml(t("index.dashboard_load_failed", { error: error.message }))}</div>`;
         } finally {
           if (refreshTimer != null) window.clearTimeout(refreshTimer);
