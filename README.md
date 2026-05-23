@@ -226,8 +226,19 @@ scrape_configs:
 - `nodelite_api_body_bytes{kind}` / `nodelite_metrics_response_body_bytes`: 最近一次构建的 API、基础 `/metrics` 与最终 `/metrics` 响应体大小。
 - `nodelite_process_resident_memory_bytes`: Server 进程 RSS,用于定位常驻内存增长。
 - `nodelite_sqlite_file_bytes{kind}`: history/audit SQLite 主文件、WAL 与 SHM 文件大小。
+- `nodelite_sqlite_wal_checkpoint_observed{database}`: 最近一次 WAL checkpoint 观测是否成功。
+- `nodelite_sqlite_wal_checkpoint_active{database}`: SQLite 库当前是否处于 WAL journal mode。
+- `nodelite_sqlite_wal_checkpoint_busy{database}`: `PRAGMA wal_checkpoint(PASSIVE)` 返回的 busy 标志。
+- `nodelite_sqlite_wal_checkpoint_pages{database,state}`: `log`、`checkpointed` 与 `backlog` WAL 页数。`backlog` 持续增长且 WAL 文件 bytes 同步增长时,通常说明 checkpoint 被长读事务或磁盘 I/O 拖住。
 - `nodelite_registry_nodes` / `nodelite_registry_disk_entries_total`: 当前加载的注册节点数量。
 - `nodelite_ws_messages_total{type}`: 已认证 WebSocket 消息按类型累计计数。
+
+SQLite 运维提示:
+
+- History 使用 WAL 模式提升写入/查询并发,`/metrics` 会最多每 60 秒执行一次受控的 `wal_checkpoint(PASSIVE)` 观测。`PASSIVE` 不会截断 WAL,也不会等待其它连接释放锁;它只暴露当前 WAL 页数、已 checkpoint 页数和 busy 状态。
+- History 和 Audit 的 retention prune 使用 `DELETE` 删除过期行。SQLite 主库文件不会因为 `DELETE` 立即缩小,WAL 也可能在 checkpoint 前保持较大;这属于 SQLite 的正常文件复用行为。
+- `nodelite_sqlite_file_bytes{kind="history_wal"}` 或 `kind="audit_wal"` 持续增长时,建议同时告警 `nodelite_sqlite_wal_checkpoint_pages{state="backlog"}` 和 busy 标志,用来区分写入增长、checkpoint 被阻塞和外部磁盘问题。
+- 如需回收主库文件空洞,在维护窗口停止服务或确保无长事务后手动执行 `VACUUM`;如需强制截断 WAL,应在维护窗口对目标库执行 `PRAGMA wal_checkpoint(TRUNCATE)`。不要在高峰期把这些操作放进自动热路径。
 
 ## 测试覆盖率
 

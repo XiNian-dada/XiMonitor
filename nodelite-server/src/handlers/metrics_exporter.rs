@@ -190,6 +190,27 @@ pub(crate) struct WsMessageMetrics {
     pub(crate) refresh_token_request_total: u64,
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SqliteWalCheckpointStats {
+    pub(crate) observed: bool,
+    pub(crate) active: bool,
+    pub(crate) busy: u64,
+    pub(crate) log_pages: u64,
+    pub(crate) checkpointed_pages: u64,
+}
+
+impl SqliteWalCheckpointStats {
+    fn backlog_pages(self) -> u64 {
+        self.log_pages.saturating_sub(self.checkpointed_pages)
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SqliteWalCheckpointMetrics {
+    pub(crate) history: SqliteWalCheckpointStats,
+    pub(crate) audit: SqliteWalCheckpointStats,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct RuntimeMetrics {
     pub(crate) process_resident_memory_bytes: Option<u64>,
@@ -199,6 +220,7 @@ pub(crate) struct RuntimeMetrics {
     pub(crate) audit_db_bytes: u64,
     pub(crate) audit_wal_bytes: u64,
     pub(crate) audit_shm_bytes: u64,
+    pub(crate) sqlite_wal_checkpoint: SqliteWalCheckpointMetrics,
     pub(crate) registry_nodes: u64,
     pub(crate) registry_disk_entries_total: u64,
     pub(crate) ws_messages: WsMessageMetrics,
@@ -241,6 +263,7 @@ pub(crate) fn render_runtime_metrics(metrics: RuntimeMetrics) -> String {
         &[],
         metrics.history_wal_bytes,
     );
+    render_sqlite_wal_checkpoint_metrics(&mut emitter, metrics.sqlite_wal_checkpoint);
     emitter.gauge(
         "nodelite_registry_nodes",
         "Number of registered nodes currently loaded in memory.",
@@ -270,6 +293,44 @@ pub(crate) fn render_runtime_metrics(metrics: RuntimeMetrics) -> String {
         );
     }
     emitter.finish()
+}
+
+fn render_sqlite_wal_checkpoint_metrics(
+    emitter: &mut MetricEmitter,
+    metrics: SqliteWalCheckpointMetrics,
+) {
+    for (database, stats) in [("history", metrics.history), ("audit", metrics.audit)] {
+        emitter.gauge(
+            "nodelite_sqlite_wal_checkpoint_observed",
+            "Whether the latest SQLite WAL checkpoint observation succeeded.",
+            &[("database", database)],
+            if stats.observed { 1 } else { 0 },
+        );
+        emitter.gauge(
+            "nodelite_sqlite_wal_checkpoint_active",
+            "Whether the SQLite database is currently using WAL journal mode.",
+            &[("database", database)],
+            if stats.active { 1 } else { 0 },
+        );
+        emitter.gauge(
+            "nodelite_sqlite_wal_checkpoint_busy",
+            "Busy flag returned by PRAGMA wal_checkpoint(PASSIVE).",
+            &[("database", database)],
+            stats.busy,
+        );
+        for (state, pages) in [
+            ("log", stats.log_pages),
+            ("checkpointed", stats.checkpointed_pages),
+            ("backlog", stats.backlog_pages()),
+        ] {
+            emitter.gauge(
+                "nodelite_sqlite_wal_checkpoint_pages",
+                "SQLite WAL checkpoint page counts from PRAGMA wal_checkpoint(PASSIVE).",
+                &[("database", database), ("state", state)],
+                pages,
+            );
+        }
+    }
 }
 
 pub(crate) fn render_metrics_response_body_bytes(bytes: u64) -> String {
@@ -601,9 +662,10 @@ mod tests {
     use chrono::Utc;
 
     use super::{
-        ApiCacheMetrics, RuntimeMetrics, WriterMetrics, WsMessageMetrics, render_agent_log_metrics,
-        render_api_cache_metrics, render_metrics_response_body_bytes, render_prometheus_metrics,
-        render_runtime_metrics, render_writer_metrics,
+        ApiCacheMetrics, RuntimeMetrics, SqliteWalCheckpointMetrics, SqliteWalCheckpointStats,
+        WriterMetrics, WsMessageMetrics, render_agent_log_metrics, render_api_cache_metrics,
+        render_metrics_response_body_bytes, render_prometheus_metrics, render_runtime_metrics,
+        render_writer_metrics,
     };
     use crate::ServerReadiness;
     use crate::agent_logs::AgentLogStats;
@@ -790,6 +852,22 @@ mod tests {
             audit_db_bytes: 2048,
             audit_wal_bytes: 256,
             audit_shm_bytes: 128,
+            sqlite_wal_checkpoint: SqliteWalCheckpointMetrics {
+                history: SqliteWalCheckpointStats {
+                    observed: true,
+                    active: true,
+                    busy: 0,
+                    log_pages: 24,
+                    checkpointed_pages: 20,
+                },
+                audit: SqliteWalCheckpointStats {
+                    observed: true,
+                    active: false,
+                    busy: 1,
+                    log_pages: 10,
+                    checkpointed_pages: 7,
+                },
+            },
             registry_nodes: 3,
             registry_disk_entries_total: 3,
             ws_messages: WsMessageMetrics {
@@ -810,6 +888,23 @@ mod tests {
         assert!(body.contains("nodelite_history_db_bytes 4096"));
         assert!(body.contains("# TYPE nodelite_history_wal_bytes gauge"));
         assert!(body.contains("nodelite_history_wal_bytes 1024"));
+        assert!(body.contains("# TYPE nodelite_sqlite_wal_checkpoint_observed gauge"));
+        assert!(body.contains("nodelite_sqlite_wal_checkpoint_observed{database=\"history\"} 1"));
+        assert!(body.contains("# TYPE nodelite_sqlite_wal_checkpoint_active gauge"));
+        assert!(body.contains("nodelite_sqlite_wal_checkpoint_active{database=\"history\"} 1"));
+        assert!(body.contains("nodelite_sqlite_wal_checkpoint_active{database=\"audit\"} 0"));
+        assert!(body.contains("# TYPE nodelite_sqlite_wal_checkpoint_busy gauge"));
+        assert!(body.contains("nodelite_sqlite_wal_checkpoint_busy{database=\"audit\"} 1"));
+        assert!(body.contains("# TYPE nodelite_sqlite_wal_checkpoint_pages gauge"));
+        assert!(body.contains(
+            "nodelite_sqlite_wal_checkpoint_pages{database=\"history\",state=\"log\"} 24"
+        ));
+        assert!(body.contains(
+            "nodelite_sqlite_wal_checkpoint_pages{database=\"history\",state=\"backlog\"} 4"
+        ));
+        assert!(body.contains(
+            "nodelite_sqlite_wal_checkpoint_pages{database=\"audit\",state=\"checkpointed\"} 7"
+        ));
         assert!(body.contains("# TYPE nodelite_registry_nodes gauge"));
         assert!(body.contains("nodelite_registry_nodes 3"));
         assert!(body.contains("# TYPE nodelite_registry_disk_entries_total gauge"));
