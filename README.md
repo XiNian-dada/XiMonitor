@@ -146,6 +146,35 @@ cargo test -p nodelite-server --release load_test_reconnect_storm_scores -- --ig
 - 这组成绩主要用于展示当前版本的大致量级感，不等同于生产 SLA。
 - 实际表现会受到构建模式、反向代理、SQLite I/O、历史保留时长、TLS 和宿主机网络条件影响。
 
+#### 大规模回归压测
+
+下面这组压测默认标记为 `ignored`，只在手动排查性能回归时运行，不影响默认 CI：
+
+```bash
+cargo test -p nodelite-server --release load_test_large_fleet_scores -- --ignored --nocapture
+cargo test -p nodelite-server --release load_test_dashboard_fanout_scores -- --ignored --nocapture
+cargo test -p nodelite-server --release load_test_history_pressure_scores -- --ignored --nocapture
+cargo test -p nodelite-server --release load_test_payload_size_scores -- --ignored --nocapture
+```
+
+覆盖范围：
+
+- `load_test_large_fleet_scores`：`500` / `1000` 节点 loopback WebSocket 上报，同时采样 `/api/overview`、`/api/nodes` 和 Prometheus `/metrics`。
+- `load_test_dashboard_fanout_scores`：`1000` 节点、`20` 个 dashboard reader 并发刷新，并穿插 Prometheus scrape。
+- `load_test_history_pressure_scores`：`1000` 节点下对历史查询做并发 reader 压力，覆盖 SQLite 读写竞争。
+- `load_test_payload_size_scores`：`500` 节点、每节点 `64` 个 disk entry，观察大 payload 的 API body 和渲染前置压力。
+
+每条 `*_RESULT` 输出都会包含对应场景的 p95 延迟、API body bytes 的 `p50/p95/max`、当前进程 RSS、history writer queue depth、dropped writes，以及 SQLite `db/wal/shm` 文件大小。
+
+首页 DOM 渲染压力可以用真实 `nodelite-server/assets/index.html` 生成自包含 fixture：
+
+```bash
+node scripts/benchmark-index-dom.mjs --nodes 500
+node scripts/benchmark-index-dom.mjs --nodes 1000
+```
+
+脚本会写入 `target/load-test/index-dom-*.html`。用浏览器打开生成文件后，页面右下角会显示 `renderMs`、`jsHeapBytes`、`domNodeCount` 和 `nodeCardCount`，同一份结果也会挂到 `window.__NODELITE_DOM_BENCHMARK__` 便于控制台读取。需要模拟大磁盘 payload 时可追加 `--disks 64`。
+
 ## 当前能力
 
 - 一键安装与升级：
