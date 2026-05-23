@@ -42,35 +42,6 @@ pub(super) fn mint_install_session(
     Ok(session)
 }
 
-pub(super) fn authorize_identity(
-    entries: &HashMap<String, RegisteredNode>,
-    identity: &NodeIdentity,
-    token: &str,
-) -> RegistryResult<AuthorizedNode> {
-    if let Some(entry) = entries.get(identity.node_id.as_str()) {
-        if !token_matches_entry(token, entry) {
-            return Err(RegistryError::Unauthorized);
-        }
-
-        if !token_is_unexpired(entry, Utc::now()) {
-            return Err(RegistryError::TokenExpired {
-                node_id: entry.node_id.clone(),
-            });
-        }
-
-        let mut identity = identity.clone();
-        identity.node_id = entry.node_id.clone();
-        identity.node_label = entry.node_label.clone();
-        identity.tags = entry.tags.clone();
-        return Ok(AuthorizedNode {
-            identity,
-            generation: entry.token_generation,
-        });
-    }
-
-    Err(RegistryError::Unauthorized)
-}
-
 pub(super) fn is_token_current(
     entries: &HashMap<String, RegisteredNode>,
     node_id: &str,
@@ -84,26 +55,30 @@ pub(super) fn is_token_current(
     false
 }
 
-/// 在两种 token 存储格式之间做兼容比较。
-///
-/// 新格式: `entry.token_hash` 是 Argon2id PHC 字符串, 用 `verify_token`。
-/// 旧格式: `entry.token_hash` 为空, `entry.token` 是明文, 走 constant-time eq。
-/// 后者应当只在首次加载未迁移的 registry.json 时出现 —— `migrate_legacy_tokens`
-/// 会立即把它升级到新格式。
-fn token_matches_entry(input: &str, entry: &RegisteredNode) -> bool {
-    if !entry.token_hash.is_empty() {
-        verify_token(input, &entry.token_hash)
-    } else if !entry.token.is_empty() {
-        constant_time_eq(input, &entry.token)
-    } else {
-        false
-    }
-}
-
 pub(super) fn token_is_unexpired(entry: &RegisteredNode, now: DateTime<Utc>) -> bool {
     entry
         .token_expires_at
         .is_none_or(|expires_at| now < expires_at)
+}
+
+pub(super) fn authorized_node_from_entry(
+    identity: &NodeIdentity,
+    entry: &RegisteredNode,
+) -> RegistryResult<AuthorizedNode> {
+    if !token_is_unexpired(entry, Utc::now()) {
+        return Err(RegistryError::TokenExpired {
+            node_id: entry.node_id.clone(),
+        });
+    }
+
+    let mut identity = identity.clone();
+    identity.node_id = entry.node_id.clone();
+    identity.node_label = entry.node_label.clone();
+    identity.tags = entry.tags.clone();
+    Ok(AuthorizedNode {
+        identity,
+        generation: entry.token_generation,
+    })
 }
 
 /// 用统一参数构造 Argon2id 实例。OWASP 2023 服务器档位:

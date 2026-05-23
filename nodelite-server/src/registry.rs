@@ -19,14 +19,19 @@ mod validate;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
+use anyhow::anyhow;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use nodelite_proto::{
     MAX_NODE_TAG_BYTES, MAX_NODE_TAGS, NodeIdentity, normalize_string_list, validate_identifier,
     validate_non_empty, validate_tag_list,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
+use tracing::warn;
 
 pub use self::error::{RegistryError, RegistryResult};
 #[allow(unused_imports)]
@@ -38,13 +43,13 @@ pub use self::render::{
 #[cfg(test)]
 use self::storage::release_registry_lock_with;
 use self::storage::{load_registry_state, mutate_registry_file};
-use self::token::{
-    authorize_identity, constant_time_eq, generate_token, hash_token,
-    is_token_current as is_token_generation_current, mint_install_session,
-    prune_expired_install_sessions,
-};
 #[cfg(test)]
-use self::token::{token_is_unexpired, verify_token};
+use self::token::token_is_unexpired;
+use self::token::{
+    authorized_node_from_entry, constant_time_eq, generate_token, hash_token,
+    is_token_current as is_token_generation_current, mint_install_session,
+    prune_expired_install_sessions, verify_token,
+};
 use self::validate::{validate_registered_node, validate_runtime_identity};
 
 /// Agent Token 默认有效期:30 天。
@@ -137,6 +142,10 @@ pub struct InstallSession {
 pub struct NodeRegistry {
     path: Arc<PathBuf>,
     state: Arc<RwLock<RegistryState>>,
+    token_verify_limit: usize,
+    token_verify_limiter: Arc<Semaphore>,
+    #[cfg(test)]
+    token_verify_probe: Option<Arc<TokenVerifyProbe>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -177,15 +186,24 @@ struct RegistryFile {
 
 /// 一次性安装令牌的有效期(分钟)。
 const INSTALL_TOKEN_TTL_MINUTES: i64 = 15;
+/// Argon2id 每次 verify 会短时占用约 19MiB 内存;限制到 2 可以把认证风暴的
+/// CPU/内存峰值钉住,同时让正常重连只承担队列等待。
+const TOKEN_VERIFY_MAX_PARALLELISM: usize = 2;
+const TOKEN_VERIFY_WAIT_WARN_AFTER: Duration = Duration::from_millis(100);
 
 impl NodeRegistry {
     /// 从磁盘加载注册表;文件不存在时返回空注册表(首次部署的合理状态)。
     pub async fn load(path: &Path) -> RegistryResult<Self> {
         let state = load_registry_state(path).await?;
+        let token_verify_limit = default_token_verify_limit();
 
         Ok(Self {
             path: Arc::new(path.to_path_buf()),
             state: Arc::new(RwLock::new(state)),
+            token_verify_limit,
+            token_verify_limiter: Arc::new(Semaphore::new(token_verify_limit)),
+            #[cfg(test)]
+            token_verify_probe: None,
         })
     }
 
@@ -198,8 +216,31 @@ impl NodeRegistry {
     ) -> RegistryResult<AuthorizedNode> {
         validate_runtime_identity(identity)?;
         validate_non_empty("hello.token", token).map_err(RegistryError::validation)?;
-        let state = self.state.read().await;
-        authorize_identity(&state.entries, identity, token)
+
+        for _ in 0..2 {
+            let Some(entry) = self.registered_node(identity.node_id.as_str()).await else {
+                return Err(RegistryError::Unauthorized);
+            };
+
+            let token_matched = self.token_matches_entry(token, &entry).await?;
+            let Some(current_entry) = self.registered_node(identity.node_id.as_str()).await else {
+                return Err(RegistryError::Unauthorized);
+            };
+
+            if !token_material_matches(&entry, &current_entry) {
+                continue;
+            }
+            if !token_matched {
+                return Err(RegistryError::Unauthorized);
+            }
+            return authorized_node_from_entry(identity, &current_entry);
+        }
+
+        warn!(
+            node_id = %identity.node_id,
+            "registry entry changed repeatedly during token verify; rejecting authorization"
+        );
+        Err(RegistryError::Unauthorized)
     }
 
     /// 判断当前 session 的 token **代次** 是否仍是该节点的最新代次。
@@ -343,11 +384,151 @@ impl NodeRegistry {
         self.path.as_path()
     }
 
+    async fn registered_node(&self, node_id: &str) -> Option<RegisteredNode> {
+        let state = self.state.read().await;
+        state.entries.get(node_id).cloned()
+    }
+
+    async fn token_matches_entry(
+        &self,
+        input: &str,
+        entry: &RegisteredNode,
+    ) -> RegistryResult<bool> {
+        if !entry.token_hash.is_empty() {
+            self.verify_hashed_token(input, &entry.token_hash).await
+        } else if !entry.token.is_empty() {
+            Ok(constant_time_eq(input, &entry.token))
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn verify_hashed_token(&self, input: &str, token_hash: &str) -> RegistryResult<bool> {
+        let wait_started = Instant::now();
+        let permit = Arc::clone(&self.token_verify_limiter)
+            .acquire_owned()
+            .await
+            .map_err(|error| {
+                RegistryError::internal("token verify limiter closed", anyhow!(error))
+            })?;
+        let waited = wait_started.elapsed();
+        if waited >= TOKEN_VERIFY_WAIT_WARN_AFTER {
+            warn!(
+                wait_ms = waited.as_millis(),
+                limit = self.token_verify_limit,
+                "argon2 token verify waited for global concurrency limiter"
+            );
+        }
+
+        let input = input.to_string();
+        let token_hash = token_hash.to_string();
+        #[cfg(test)]
+        let probe = self.token_verify_probe.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            #[cfg(test)]
+            let _probe_guard = probe.as_ref().map(|probe| probe.enter());
+            verify_token(&input, &token_hash)
+        })
+        .await
+        .map_err(|error| RegistryError::internal("token verify task failed", anyhow!(error)))
+    }
+
     async fn replace_state_from_file(&self, file: RegistryFile) -> RegistryResult<()> {
         let state = storage::load_registry_state_from_file(self.path.as_path(), file)?;
         let mut guard = self.state.write().await;
         *guard = state;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_token_verify_limit_for_tests(mut self, max_parallel: usize) -> Self {
+        assert!(max_parallel > 0, "test token verify limit must be positive");
+        self.token_verify_limit = max_parallel;
+        self.token_verify_limiter = Arc::new(Semaphore::new(max_parallel));
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_token_verify_probe_for_tests(
+        mut self,
+        probe: Arc<TokenVerifyProbe>,
+    ) -> Self {
+        self.token_verify_probe = Some(probe);
+        self
+    }
+}
+
+fn default_token_verify_limit() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get().min(TOKEN_VERIFY_MAX_PARALLELISM))
+        .unwrap_or(1)
+        .max(1)
+}
+
+fn token_material_matches(left: &RegisteredNode, right: &RegisteredNode) -> bool {
+    left.token_generation == right.token_generation
+        && left.token_hash == right.token_hash
+        && constant_time_eq(&left.token, &right.token)
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(super) struct TokenVerifyProbe {
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+    delay: Duration,
+}
+
+#[cfg(test)]
+impl TokenVerifyProbe {
+    pub(super) fn new(delay: Duration) -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            delay,
+        }
+    }
+
+    pub(super) fn max_active(&self) -> usize {
+        self.max_active.load(Ordering::SeqCst)
+    }
+
+    fn enter(&self) -> TokenVerifyProbeGuard<'_> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.record_max_active(active);
+        if !self.delay.is_zero() {
+            std::thread::sleep(self.delay);
+        }
+        TokenVerifyProbeGuard { probe: self }
+    }
+
+    fn record_max_active(&self, active: usize) {
+        let mut observed = self.max_active.load(Ordering::SeqCst);
+        while active > observed {
+            match self.max_active.compare_exchange(
+                observed,
+                active,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return,
+                Err(next_observed) => observed = next_observed,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+struct TokenVerifyProbeGuard<'a> {
+    probe: &'a TokenVerifyProbe,
+}
+
+#[cfg(test)]
+impl Drop for TokenVerifyProbeGuard<'_> {
+    fn drop(&mut self) {
+        self.probe.active.fetch_sub(1, Ordering::SeqCst);
     }
 }
 

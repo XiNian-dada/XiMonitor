@@ -1,4 +1,5 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use proptest::prelude::*;
@@ -6,7 +7,7 @@ use tokio::runtime::Runtime;
 
 use super::{
     IssueNodeRequest, MAX_NODE_TAG_BYTES, NodeRegistry, RegisteredNode, RegistryError,
-    RegistryFile, build_agent_server_url, build_github_release_base_url,
+    RegistryFile, TokenVerifyProbe, build_agent_server_url, build_github_release_base_url,
     default_agent_release_base_url, issue_node, release_registry_lock_with, render_install_command,
     token_is_unexpired, validate_registered_node, verify_token,
 };
@@ -143,6 +144,56 @@ fn load_hashes_legacy_plaintext_tokens_and_persists_migration() {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&temp_dir);
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn token_verify_limiter_caps_parallel_argon2_verifies() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be monotonic enough")
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!("nodelite-token-verify-limit-{unique}"));
+    std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+    let path = temp_dir.join("server.json");
+
+    let issued = issue_node(
+        &path,
+        IssueNodeRequest {
+            node_id: "storm-01".to_string(),
+            node_label: Some("Storm 01".to_string()),
+            tags: Vec::new(),
+        },
+    )
+    .await
+    .expect("node should be issued");
+    let probe = Arc::new(TokenVerifyProbe::new(Duration::from_millis(75)));
+    let registry = NodeRegistry::load(&path)
+        .await
+        .expect("registry should load")
+        .with_token_verify_limit_for_tests(1)
+        .with_token_verify_probe_for_tests(Arc::clone(&probe));
+    let identity = identity_for("storm-01");
+
+    let mut handles = Vec::new();
+    for _ in 0..6 {
+        let registry = registry.clone();
+        let identity = identity.clone();
+        let token = issued.node_session_token.clone();
+        handles.push(tokio::spawn(async move {
+            registry.authorize(&identity, &token).await
+        }));
+    }
+
+    for result in futures::future::join_all(handles).await {
+        let authorized = result
+            .expect("authorize task should complete")
+            .expect("token should authorize");
+        assert_eq!(authorized.identity.node_id, "storm-01");
+    }
+    assert_eq!(probe.max_active(), 1);
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&temp_dir);
 }
 
 #[test]
