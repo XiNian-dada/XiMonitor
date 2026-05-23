@@ -4,42 +4,45 @@ use chrono::Utc;
 use nodelite_proto::{NodeStatus, OverviewData};
 
 pub(super) fn build_overview(statuses: &[NodeStatus]) -> OverviewData {
-    let total_nodes = statuses.len();
-    let online_nodes = statuses.iter().filter(|status| status.online).count();
-    let offline_nodes = total_nodes.saturating_sub(online_nodes);
-    let total_rx_bytes = statuses
-        .iter()
-        .filter_map(|status| status.snapshot.as_ref())
-        .fold(0_u64, |total, snapshot| {
-            total.saturating_add(snapshot.network.total_rx_bytes)
-        });
-    let total_tx_bytes = statuses
-        .iter()
-        .filter_map(|status| status.snapshot.as_ref())
-        .fold(0_u64, |total, snapshot| {
-            total.saturating_add(snapshot.network.total_tx_bytes)
-        });
-    let current_rx_bytes_per_sec = statuses
-        .iter()
-        .filter_map(|status| status.snapshot.as_ref())
-        .filter_map(|snapshot| snapshot.network.rx_bytes_per_sec)
-        .fold(0.0, sum_finite_f64);
-    let current_tx_bytes_per_sec = statuses
-        .iter()
-        .filter_map(|status| status.snapshot.as_ref())
-        .filter_map(|snapshot| snapshot.network.tx_bytes_per_sec)
-        .fold(0.0, sum_finite_f64);
+    build_overview_from_iter(statuses.iter())
+}
 
+pub(super) fn build_overview_from_iter<'a>(
+    statuses: impl IntoIterator<Item = &'a NodeStatus>,
+) -> OverviewData {
+    let mut total_nodes = 0_usize;
+    let mut online_nodes = 0_usize;
+    let mut total_rx_bytes = 0_u64;
+    let mut total_tx_bytes = 0_u64;
+    let mut current_rx_bytes_per_sec = 0.0;
+    let mut current_tx_bytes_per_sec = 0.0;
     let mut latency_total = 0_u128;
     let mut latency_samples = 0_usize;
-    for latency in statuses
-        .iter()
-        .filter(|status| status.online)
-        .filter_map(|status| status.latency_ms)
-    {
-        latency_total = latency_total.saturating_add(latency as u128);
-        latency_samples += 1;
+
+    for status in statuses {
+        total_nodes += 1;
+        if status.online {
+            online_nodes += 1;
+            if let Some(latency) = status.latency_ms {
+                latency_total = latency_total.saturating_add(latency as u128);
+                latency_samples += 1;
+            }
+        }
+
+        let Some(snapshot) = status.snapshot.as_ref() else {
+            continue;
+        };
+        total_rx_bytes = total_rx_bytes.saturating_add(snapshot.network.total_rx_bytes);
+        total_tx_bytes = total_tx_bytes.saturating_add(snapshot.network.total_tx_bytes);
+        if let Some(rx) = snapshot.network.rx_bytes_per_sec {
+            current_rx_bytes_per_sec = sum_finite_f64(current_rx_bytes_per_sec, rx);
+        }
+        if let Some(tx) = snapshot.network.tx_bytes_per_sec {
+            current_tx_bytes_per_sec = sum_finite_f64(current_tx_bytes_per_sec, tx);
+        }
     }
+
+    let offline_nodes = total_nodes.saturating_sub(online_nodes);
     let average_latency_ms =
         (latency_samples > 0).then(|| latency_total as f64 / latency_samples as f64);
 

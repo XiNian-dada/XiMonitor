@@ -48,6 +48,54 @@ pub(crate) fn render_writer_metrics(metrics: WriterMetrics) -> String {
     emitter.finish()
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ApiCacheMetrics {
+    pub(crate) nodes_hits: u64,
+    pub(crate) nodes_misses: u64,
+    pub(crate) nodes_body_bytes: u64,
+    pub(crate) overview_hits: u64,
+    pub(crate) overview_misses: u64,
+    pub(crate) overview_body_bytes: u64,
+}
+
+pub(crate) fn render_api_cache_metrics(metrics: ApiCacheMetrics) -> String {
+    let mut emitter = MetricEmitter::default();
+    for (kind, hits, misses, body_bytes) in [
+        (
+            "nodes",
+            metrics.nodes_hits,
+            metrics.nodes_misses,
+            metrics.nodes_body_bytes,
+        ),
+        (
+            "overview",
+            metrics.overview_hits,
+            metrics.overview_misses,
+            metrics.overview_body_bytes,
+        ),
+    ] {
+        emitter.counter(
+            "nodelite_api_cache_hits_total",
+            "Number of cached API response body hits.",
+            &[("kind", kind)],
+            hits,
+        );
+        emitter.counter(
+            "nodelite_api_cache_misses_total",
+            "Number of cached API response body misses.",
+            &[("kind", kind)],
+            misses,
+        );
+        emitter.gauge(
+            "nodelite_api_body_bytes",
+            "Size in bytes of the most recently built cached API response body.",
+            &[("kind", kind)],
+            body_bytes,
+        );
+    }
+    emitter.finish()
+}
+
 fn render_server_metrics(emitter: &mut MetricEmitter, readiness: &ServerReadiness) {
     emitter.gauge(
         "nodelite_server_ready",
@@ -365,7 +413,10 @@ fn escape_prometheus_label_value(value: &str) -> String {
 mod tests {
     use chrono::Utc;
 
-    use super::{WriterMetrics, render_prometheus_metrics, render_writer_metrics};
+    use super::{
+        ApiCacheMetrics, WriterMetrics, render_api_cache_metrics, render_prometheus_metrics,
+        render_writer_metrics,
+    };
     use crate::ServerReadiness;
     use nodelite_proto::{
         DiskUsage, LoadAverage, MemoryUsage, NetworkCounters, NodeIdentity, NodeSnapshot,
@@ -471,6 +522,28 @@ mod tests {
         assert!(body.contains("nodelite_audit_dropped_writes_total 5"));
         assert!(body.contains("# TYPE nodelite_audit_write_failures_total counter"));
         assert!(body.contains("nodelite_audit_write_failures_total 7"));
+    }
+
+    #[test]
+    fn exporter_exposes_api_cache_metrics() {
+        let body = render_api_cache_metrics(ApiCacheMetrics {
+            nodes_hits: 11,
+            nodes_misses: 2,
+            nodes_body_bytes: 4096,
+            overview_hits: 13,
+            overview_misses: 3,
+            overview_body_bytes: 256,
+        });
+
+        assert!(body.contains("# TYPE nodelite_api_cache_hits_total counter"));
+        assert!(body.contains("nodelite_api_cache_hits_total{kind=\"nodes\"} 11"));
+        assert!(body.contains("nodelite_api_cache_hits_total{kind=\"overview\"} 13"));
+        assert!(body.contains("# TYPE nodelite_api_cache_misses_total counter"));
+        assert!(body.contains("nodelite_api_cache_misses_total{kind=\"nodes\"} 2"));
+        assert!(body.contains("nodelite_api_cache_misses_total{kind=\"overview\"} 3"));
+        assert!(body.contains("# TYPE nodelite_api_body_bytes gauge"));
+        assert!(body.contains("nodelite_api_body_bytes{kind=\"nodes\"} 4096"));
+        assert!(body.contains("nodelite_api_body_bytes{kind=\"overview\"} 256"));
     }
 
     fn sample_statuses() -> Vec<NodeStatus> {

@@ -8,7 +8,9 @@ use tracing::error;
 
 use crate::AppState;
 use crate::audit::{AuditEventType, AuditLogError, AuditQuery};
-use crate::handlers::metrics_exporter::{WriterMetrics, render_writer_metrics};
+use crate::handlers::metrics_exporter::{
+    WriterMetrics, render_api_cache_metrics, render_writer_metrics,
+};
 use crate::history::HistoryError;
 use nodelite_proto::AgentLogEntry;
 
@@ -108,6 +110,8 @@ pub(crate) async fn metrics(State(state): State<AppState>) -> Response {
         audit_write_failures: state.audit_log.write_failures(),
     });
     body.extend_from_slice(writer_metrics.as_bytes());
+    let api_cache_metrics = render_api_cache_metrics(state.shared.api_cache_metrics());
+    body.extend_from_slice(api_cache_metrics.as_bytes());
     (
         [
             (header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE),

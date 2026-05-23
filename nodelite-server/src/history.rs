@@ -31,7 +31,7 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{error, warn};
 
-use self::init::initialize_database;
+use self::init::{initialize_database, open_read_connection};
 #[cfg(test)]
 use self::query::HISTORY_QUERY_SQL;
 use self::query::{query_history, query_history_between};
@@ -91,8 +91,10 @@ impl std::error::Error for HistoryError {
 pub struct HistoryStore {
     db_path: Arc<PathBuf>,
     available: Arc<AtomicBool>,
-    /// 持久化 SQLite 连接,只在 query 路径短暂持有;写入由 writer task 独占。
-    connection: Arc<Mutex<Option<Connection>>>,
+    /// 持久化 SQLite 写连接,由 writer task 短暂持有。
+    write_connection: Arc<Mutex<Option<Connection>>>,
+    /// 持久化 SQLite 查询连接,只在 query 路径短暂持有。
+    read_connection: Arc<Mutex<Option<Connection>>>,
     /// 节点 → 上一次成功节流通过的时间。仅短暂持有 lock(check + 乐观更新),
     /// 不再跨越 spawn_blocking,因此与 SQLite I/O 解耦。
     last_written_at: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
@@ -116,7 +118,8 @@ impl HistoryStore {
         Self {
             db_path: Arc::new(db_path),
             available: Arc::new(AtomicBool::new(false)),
-            connection: Arc::new(Mutex::new(None)),
+            write_connection: Arc::new(Mutex::new(None)),
+            read_connection: Arc::new(Mutex::new(None)),
             last_written_at: Arc::new(Mutex::new(HashMap::new())),
             last_pruned_at: Arc::new(AtomicI64::new(0)),
             artifacts_hardened_after_write: Arc::new(AtomicBool::new(false)),
@@ -132,16 +135,22 @@ impl HistoryStore {
         let db_path = Arc::clone(&self.db_path);
         let sqlite_busy_timeout_secs = self.sqlite_busy_timeout_secs;
         let result = tokio::task::spawn_blocking(move || {
-            initialize_database(db_path.as_ref(), sqlite_busy_timeout_secs)
+            let write_connection = initialize_database(db_path.as_ref(), sqlite_busy_timeout_secs)?;
+            let read_connection = open_read_connection(db_path.as_ref(), sqlite_busy_timeout_secs)?;
+            anyhow::Ok((write_connection, read_connection))
         })
         .await
         .context("history database task failed");
 
         match result {
-            Ok(Ok(connection)) => {
+            Ok(Ok((write_connection, read_connection))) => {
                 {
-                    let mut guard = self.connection.lock().await;
-                    *guard = Some(connection);
+                    let mut guard = self.write_connection.lock().await;
+                    *guard = Some(write_connection);
+                }
+                {
+                    let mut guard = self.read_connection.lock().await;
+                    *guard = Some(read_connection);
                 }
                 self.available.store(true, Ordering::Relaxed);
                 self.spawn_writer_task().await;
@@ -167,7 +176,7 @@ impl HistoryStore {
         }
         let context = WriterContext {
             db_path: Arc::clone(&self.db_path),
-            connection: Arc::clone(&self.connection),
+            write_connection: Arc::clone(&self.write_connection),
             last_pruned_at: Arc::clone(&self.last_pruned_at),
             artifacts_hardened_after_write: Arc::clone(&self.artifacts_hardened_after_write),
         };
@@ -304,7 +313,7 @@ impl HistoryStore {
             return Ok(Vec::new());
         }
 
-        let connection_arc = Arc::clone(&self.connection);
+        let connection_arc = Arc::clone(&self.read_connection);
         let node_id = node_id.to_string();
         let clamped_window_hours = window_hours.clamp(1, DEFAULT_HISTORY_RETENTION_HOURS);
         let clamped_max_points = max_points.max(60);
@@ -342,7 +351,7 @@ impl HistoryStore {
             return Ok(Vec::new());
         }
 
-        let connection_arc = Arc::clone(&self.connection);
+        let connection_arc = Arc::clone(&self.read_connection);
         let node_id = node_id.to_string();
         let clamped_max_points = max_points.max(60);
 
@@ -812,6 +821,62 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM history_points", [], |row| row.get(0))
             .expect("count query");
         assert_eq!(count, 5);
+
+        let _ = std::fs::remove_file(&db_path);
+        if let Some(parent) = db_path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+
+    #[tokio::test]
+    async fn query_history_does_not_wait_for_write_connection_lock() {
+        let db_path = temp_history_db_path("query-read-connection");
+        let store = HistoryStore::new(db_path.clone(), 5);
+        store.initialize().await;
+        assert!(store.is_available());
+
+        let status = fake_status_for("hk-01", Utc::now());
+        store.record_status(&status).await;
+        store.shutdown().await;
+
+        let write_guard = store.write_connection.lock().await;
+        let points = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            store.query_history("hk-01", 1, 60),
+        )
+        .await
+        .expect("query should not wait for write connection lock")
+        .expect("query should succeed through read connection");
+        drop(write_guard);
+
+        assert!(!points.is_empty());
+
+        let _ = std::fs::remove_file(&db_path);
+        if let Some(parent) = db_path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+
+    #[tokio::test]
+    async fn history_writer_does_not_wait_for_read_connection_lock() {
+        let db_path = temp_history_db_path("writer-write-connection");
+        let store = HistoryStore::new(db_path.clone(), 5);
+        store.initialize().await;
+        assert!(store.is_available());
+
+        let read_guard = store.read_connection.lock().await;
+        let status = fake_status_for("hk-01", Utc::now());
+        store.record_status(&status).await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), store.shutdown())
+            .await
+            .expect("writer flush should not wait for read connection lock");
+        drop(read_guard);
+
+        let connection = initialize_database(&db_path, 5).expect("re-open database");
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM history_points", [], |row| row.get(0))
+            .expect("count query");
+        assert_eq!(count, 1);
 
         let _ = std::fs::remove_file(&db_path);
         if let Some(parent) = db_path.parent() {

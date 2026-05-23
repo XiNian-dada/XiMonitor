@@ -45,7 +45,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
     details TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp_desc ON audit_log(timestamp DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_log_event_type ON audit_log(event_type);
+CREATE INDEX IF NOT EXISTS idx_audit_log_event_success_time
+    ON audit_log(event_type, success, timestamp DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_log_success_time
+    ON audit_log(success, timestamp DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_log_ip_address ON audit_log(ip_address);
 "#;
 

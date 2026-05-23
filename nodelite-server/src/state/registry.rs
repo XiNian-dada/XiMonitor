@@ -8,7 +8,7 @@ use nodelite_proto::{NodeIdentity, NodeSnapshot, NodeStatus, OverviewData};
 use tokio::sync::mpsc;
 
 use super::SessionCommand;
-use super::overview::build_overview;
+use super::overview::{build_overview, build_overview_from_iter};
 
 #[derive(Debug, Default)]
 pub(super) struct Registry {
@@ -180,10 +180,8 @@ impl Registry {
         entry.control_tx.clone()
     }
 
-    #[cfg(test)]
     pub(super) fn overview(&self) -> OverviewData {
-        let statuses = self.list_statuses();
-        self.overview_from_statuses(&statuses)
+        build_overview_from_iter(self.nodes.values().map(|entry| &entry.status))
     }
 
     pub(super) fn overview_from_statuses(&self, statuses: &[NodeStatus]) -> OverviewData {

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::fs_security::{create_private_dir_all, ensure_directory_mode};
 
@@ -125,6 +125,25 @@ fn migrate_nullable_cpu_usage(connection: &Connection) -> Result<()> {
         "#,
     )?;
     Ok(())
+}
+
+/// 打开查询专用连接。初始化阶段已经确保库文件和 schema 存在,
+/// 这里使用只读连接,避免 history 查询与 writer task 争用同一个连接 mutex。
+pub(super) fn open_read_connection(
+    db_path: &PathBuf,
+    sqlite_busy_timeout_secs: u64,
+) -> Result<Connection> {
+    let connection = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| {
+            format!(
+                "failed to open read-only history database {}",
+                db_path.display()
+            )
+        })?;
+    connection
+        .busy_timeout(Duration::from_secs(sqlite_busy_timeout_secs))
+        .context("failed to configure sqlite read busy timeout")?;
+    Ok(connection)
 }
 
 /// 打开 SQLite 连接,可选启用 WAL 模式以提升并发写入吞吐。

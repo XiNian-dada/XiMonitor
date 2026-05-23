@@ -61,15 +61,17 @@ impl ViewCache {
         }
     }
 
-    pub(super) fn store_api_bodies(
-        &mut self,
-        revision: u64,
-        nodes_json: Bytes,
-        overview_json: Bytes,
-    ) {
-        self.revision = revision;
-        self.nodes_json = Some(nodes_json);
-        self.overview_json = Some(overview_json);
+    pub(super) fn store_api_body(&mut self, revision: u64, kind: ApiBodyKind, body: Bytes) {
+        if self.revision != revision {
+            self.revision = revision;
+            self.nodes_json = None;
+            self.overview_json = None;
+        }
+
+        match kind {
+            ApiBodyKind::Nodes => self.nodes_json = Some(body),
+            ApiBodyKind::Overview => self.overview_json = Some(body),
+        }
     }
 
     pub(super) fn metrics_body(

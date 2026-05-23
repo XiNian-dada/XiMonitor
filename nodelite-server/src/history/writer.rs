@@ -22,7 +22,7 @@ use crate::history::init::harden_database_artifacts;
 /// Writer task 拥有的所有共享状态(都是 `Arc`,可以低成本 clone)。
 pub(super) struct WriterContext {
     pub(super) db_path: Arc<PathBuf>,
-    pub(super) connection: Arc<Mutex<Option<Connection>>>,
+    pub(super) write_connection: Arc<Mutex<Option<Connection>>>,
     pub(super) last_pruned_at: Arc<AtomicI64>,
     pub(super) artifacts_hardened_after_write: Arc<AtomicBool>,
 }
@@ -83,7 +83,7 @@ async fn flush_history_batch(batch: &mut Vec<HistoryPoint>, context: &WriterCont
     }
     let points = std::mem::take(batch);
     let db_path = Arc::clone(&context.db_path);
-    let connection_arc = Arc::clone(&context.connection);
+    let connection_arc = Arc::clone(&context.write_connection);
     let artifacts_hardened = Arc::clone(&context.artifacts_hardened_after_write);
     let prune_before = should_prune_now(&context.last_pruned_at);
 
