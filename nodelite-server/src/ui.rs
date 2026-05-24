@@ -196,6 +196,15 @@ mod tests {
     }
 
     #[test]
+    fn node_html_fetches_detail_history_for_overview_and_network_tabs() {
+        let rendered = node_html("hk-01", 5);
+        assert!(rendered.contains("function detailHistoryNeedsData()"));
+        assert!(rendered.contains(
+            "activeTab === \"overview\" || activeTab === \"monitor\" || activeTab === \"network\" || chartModalState.key != null"
+        ));
+    }
+
+    #[test]
     fn page_csps_pin_scripts_and_allow_inline_styles_for_dashboard_layout() {
         for csp in [index_page_csp(), node_page_csp(), verify_2fa_page_csp()] {
             assert!(csp.contains("script-src 'self' 'sha256-"));

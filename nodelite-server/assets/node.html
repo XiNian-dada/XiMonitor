@@ -2761,7 +2761,11 @@
         return activeTab === "overview" || activeTab === "monitor" || activeTab === "network" || chartModalState.key != null;
       }
       function detailHistoryNeedsData() {
-        return activeTab === "monitor" || chartModalState.key != null;
+        // Overview/network render the same selected-window charts as monitor.
+        // If they skip this fetch, the page falls back to the 14-day overview
+        // sample set and the first paint looks over-smoothed until monitor/modal
+        // populates latestHistory with the higher-resolution range query.
+        return activeTab === "overview" || activeTab === "monitor" || activeTab === "network" || chartModalState.key != null;
       }
       function logsTabNeedsData() {
         return activeTab === "logs";
