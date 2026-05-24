@@ -53,5 +53,6 @@ mod tests {
         ));
         assert!(!uses_insecure_remote_url("ws://localhost:8080/ws", "ws"));
         assert!(!uses_insecure_remote_url("ws://127.0.0.1:8080/ws", "ws"));
+        assert!(!uses_insecure_remote_url("not a valid url", "http"));
     }
 }

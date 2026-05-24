@@ -142,3 +142,41 @@ pub fn percentage(used: u64, total: u64) -> f64 {
     }
     (used as f64 / total as f64) * 100.0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{MemoryUsage, percentage};
+
+    #[test]
+    fn memory_usage_reports_main_and_swap_percentages() {
+        let memory = MemoryUsage {
+            total_bytes: 400,
+            used_bytes: 100,
+            available_bytes: 300,
+            swap_total_bytes: 50,
+            swap_used_bytes: 10,
+        };
+
+        assert_eq!(memory.used_percent(), 25.0);
+        assert_eq!(memory.swap_used_percent(), Some(20.0));
+    }
+
+    #[test]
+    fn memory_usage_skips_swap_percentage_when_swap_is_disabled() {
+        let memory = MemoryUsage {
+            total_bytes: 400,
+            used_bytes: 100,
+            available_bytes: 300,
+            swap_total_bytes: 0,
+            swap_used_bytes: 0,
+        };
+
+        assert_eq!(memory.swap_used_percent(), None);
+    }
+
+    #[test]
+    fn percentage_returns_zero_when_total_is_zero() {
+        assert_eq!(percentage(5, 0), 0.0);
+        assert_eq!(percentage(25, 100), 25.0);
+    }
+}

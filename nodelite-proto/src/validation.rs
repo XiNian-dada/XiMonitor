@@ -87,3 +87,42 @@ pub fn validate_tag_list(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ValidationError, normalize_string_list, validate_identifier, validate_non_empty,
+        validate_tag_list,
+    };
+
+    #[test]
+    fn validation_error_displays_original_message() {
+        let error = ValidationError::new("boom");
+        assert_eq!(error.to_string(), "boom");
+    }
+
+    #[test]
+    fn normalize_string_list_trims_sorts_and_deduplicates() {
+        let values = normalize_string_list(vec![
+            " beta ".to_string(),
+            "".to_string(),
+            "alpha".to_string(),
+            "beta".to_string(),
+        ]);
+        assert_eq!(values, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn validation_helpers_reject_invalid_values() {
+        let error = validate_non_empty("name", "   ").expect_err("blank values should fail");
+        assert_eq!(error.to_string(), "name must not be empty");
+
+        let error =
+            validate_identifier("node_id", "bad value").expect_err("spaces are not allowed");
+        assert!(error.to_string().contains("ASCII letters"));
+
+        let error = validate_tag_list("tags", &[String::from("abcdef")], 4, 5)
+            .expect_err("oversized tags should fail");
+        assert_eq!(error.to_string(), "tags[0] must be <= 5 bytes");
+    }
+}
