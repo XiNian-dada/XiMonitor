@@ -72,7 +72,7 @@ pub(crate) async fn persist_snapshot_if_changed(
     path: &Path,
     checkpoint: &mut SnapshotPersistCheckpoint,
 ) -> Result<bool> {
-    let revision = shared.view_revision();
+    let revision = shared.nodes_revision();
     if checkpoint.last_revision == Some(revision) {
         return Ok(false);
     }

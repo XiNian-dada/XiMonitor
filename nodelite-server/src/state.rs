@@ -46,7 +46,9 @@ pub struct SharedState {
     config: Arc<ServerConfig>,
     registry: Arc<RwLock<Registry>>,
     next_session_id: Arc<AtomicU64>,
-    view_revision: Arc<AtomicU64>,
+    overview_revision: Arc<AtomicU64>,
+    nodes_revision: Arc<AtomicU64>,
+    metrics_revision: Arc<AtomicU64>,
     overview_cache: Arc<Mutex<JsonViewSlot>>,
     nodes_cache: Arc<Mutex<JsonViewSlot>>,
     metrics_cache: Arc<Mutex<MetricsViewSlot>>,
@@ -78,7 +80,9 @@ impl SharedState {
             config: Arc::clone(&config),
             registry: Arc::new(RwLock::new(Registry::default())),
             next_session_id: Arc::new(AtomicU64::new(1)),
-            view_revision: Arc::new(AtomicU64::new(1)),
+            overview_revision: Arc::new(AtomicU64::new(1)),
+            nodes_revision: Arc::new(AtomicU64::new(1)),
+            metrics_revision: Arc::new(AtomicU64::new(1)),
             overview_cache: Arc::new(Mutex::new(JsonViewSlot::default())),
             nodes_cache: Arc::new(Mutex::new(JsonViewSlot::default())),
             metrics_cache: Arc::new(Mutex::new(MetricsViewSlot::default())),
@@ -109,8 +113,8 @@ impl SharedState {
         self.config.as_ref()
     }
 
-    pub(crate) fn view_revision(&self) -> u64 {
-        self.view_revision.load(Ordering::Acquire)
+    pub(crate) fn nodes_revision(&self) -> u64 {
+        self.nodes_revision.load(Ordering::Acquire)
     }
 
     /// 登记一个新的 WebSocket 会话并返回唯一的 `session_id`。
@@ -294,7 +298,7 @@ impl SharedState {
     /// 返回缓存后的 `/metrics` 响应体。
     /// 缓存键由节点视图 revision、服务 readiness 摘要与最大存活时间共同决定。
     pub async fn metrics_text(&self, readiness: &ServerReadiness) -> Bytes {
-        let revision = self.view_revision.load(Ordering::Acquire);
+        let revision = self.metrics_revision.load(Ordering::Acquire);
         let readiness_snapshot = ReadinessSnapshot::capture(readiness);
         let max_age = Duration::from_secs(self.config.refresh_interval_secs.max(1));
 
@@ -307,7 +311,7 @@ impl SharedState {
         }
 
         let _build_guard = self.metrics_cache_build_lock.lock().await;
-        let revision = self.view_revision.load(Ordering::Acquire);
+        let revision = self.metrics_revision.load(Ordering::Acquire);
         let readiness_snapshot = ReadinessSnapshot::capture(readiness);
         {
             let cache = self.metrics_cache.lock().await;
@@ -327,7 +331,7 @@ impl SharedState {
         self.metrics_body_bytes
             .store(body.len() as u64, Ordering::Relaxed);
 
-        if self.view_revision.load(Ordering::Acquire) == revision {
+        if self.metrics_revision.load(Ordering::Acquire) == revision {
             let mut cache = self.metrics_cache.lock().await;
             cache.store(revision, readiness_snapshot, body.clone());
         }
@@ -355,8 +359,13 @@ impl SharedState {
         self.bump_view_revision();
     }
 
+    /// 当前阶段:所有 mutator 都把三个视图 revision 一起 bump,
+    /// 保持与单一 revision 的等价语义。后续 commit 会拆分,让 snapshot/latency
+    /// 之类的更新只触达真正受影响的视图。
     fn bump_view_revision(&self) {
-        self.view_revision.fetch_add(1, Ordering::AcqRel);
+        self.overview_revision.fetch_add(1, Ordering::AcqRel);
+        self.nodes_revision.fetch_add(1, Ordering::AcqRel);
+        self.metrics_revision.fetch_add(1, Ordering::AcqRel);
     }
 
     fn json_slot_for(&self, kind: ApiBodyKind) -> &Arc<Mutex<JsonViewSlot>> {
@@ -366,9 +375,17 @@ impl SharedState {
         }
     }
 
+    fn revision_atomic_for(&self, kind: ApiBodyKind) -> &AtomicU64 {
+        match kind {
+            ApiBodyKind::Nodes => &self.nodes_revision,
+            ApiBodyKind::Overview => &self.overview_revision,
+        }
+    }
+
     async fn cached_api_json_bytes(&self, kind: ApiBodyKind) -> Result<Bytes, serde_json::Error> {
         let slot = self.json_slot_for(kind);
-        let revision = self.view_revision.load(Ordering::Acquire);
+        let revision_atomic = self.revision_atomic_for(kind);
+        let revision = revision_atomic.load(Ordering::Acquire);
         {
             let cache = slot.lock().await;
             if let Some(body) = cache.get(revision) {
@@ -382,7 +399,7 @@ impl SharedState {
             ApiBodyKind::Overview => &self.api_overview_cache_build_lock,
         };
         let _build_guard = build_lock.lock().await;
-        let revision = self.view_revision.load(Ordering::Acquire);
+        let revision = revision_atomic.load(Ordering::Acquire);
         {
             let cache = slot.lock().await;
             if let Some(body) = cache.get(revision) {
@@ -405,7 +422,7 @@ impl SharedState {
         };
         self.record_api_body_bytes(kind, body.len());
 
-        if self.view_revision.load(Ordering::Acquire) == revision {
+        if revision_atomic.load(Ordering::Acquire) == revision {
             let mut cache = slot.lock().await;
             cache.store(revision, body.clone());
         }
