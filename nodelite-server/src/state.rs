@@ -208,6 +208,11 @@ impl SharedState {
         registry.list_statuses()
     }
 
+    pub async fn list_node_summaries(&self) -> Vec<NodeListItem> {
+        let registry = self.registry.read().await;
+        registry.list_node_summaries()
+    }
+
     pub async fn get_status(&self, node_id: &str) -> Option<NodeStatus> {
         let registry = self.registry.read().await;
         registry.get_status(node_id)
@@ -437,8 +442,7 @@ impl SharedState {
 
         let body = match kind {
             ApiBodyKind::Nodes => {
-                let statuses = self.list_statuses().await;
-                let summaries: Vec<NodeListItem> = statuses.iter().map(NodeListItem::from).collect();
+                let summaries = self.list_node_summaries().await;
                 Bytes::from(serde_json::to_vec(&summaries)?)
             }
             ApiBodyKind::Overview => {

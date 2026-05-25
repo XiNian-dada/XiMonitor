@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use nodelite_proto::{NodeIdentity, NodeSnapshot, NodeStatus, OverviewData};
+use nodelite_proto::{NodeIdentity, NodeListItem, NodeSnapshot, NodeStatus, OverviewData};
 
 use super::overview::{build_overview, build_overview_from_iter};
 use super::session_control::SessionControlHandle;
@@ -162,6 +162,21 @@ impl Registry {
                 .then_with(|| left.identity.node_id.cmp(&right.identity.node_id))
         });
         statuses
+    }
+
+    pub(super) fn list_node_summaries(&self) -> Vec<NodeListItem> {
+        let mut summaries: Vec<NodeListItem> = self
+            .nodes
+            .values()
+            .map(|entry| NodeListItem::from(&entry.status))
+            .collect();
+        summaries.sort_by(|left, right| {
+            left.identity
+                .node_label
+                .cmp(&right.identity.node_label)
+                .then_with(|| left.identity.node_id.cmp(&right.identity.node_id))
+        });
+        summaries
     }
 
     pub(super) fn get_status(&self, node_id: &str) -> Option<NodeStatus> {
