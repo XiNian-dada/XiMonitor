@@ -12,6 +12,7 @@ use super::session_control::SessionControlHandle;
 #[derive(Debug, Default)]
 pub(super) struct Registry {
     nodes: HashMap<String, NodeEntry>,
+    sorted_node_ids: Vec<String>,
 }
 
 /// 单节点的注册项:对外暴露的 `status` 与内部的"当前活跃会话 ID"。
@@ -32,6 +33,7 @@ impl Registry {
         now: DateTime<Utc>,
     ) {
         let node_id = identity.node_id.clone();
+        let inserted = !self.nodes.contains_key(&node_id);
         let entry = self.nodes.entry(node_id).or_insert_with(|| NodeEntry {
             status: NodeStatus {
                 identity: identity.clone(),
@@ -59,6 +61,10 @@ impl Registry {
         entry.active_session_id = Some(session_id);
         entry.control = None;
         entry.summary = NodeListItem::from(&entry.status);
+        if inserted {
+            self.sorted_node_ids.push(entry.status.identity.node_id.clone());
+        }
+        self.resort_node_ids();
     }
 
     pub(super) fn update_snapshot(
@@ -162,33 +168,19 @@ impl Registry {
     }
 
     pub(super) fn list_statuses(&self) -> Vec<NodeStatus> {
-        let mut statuses: Vec<NodeStatus> = self
-            .nodes
-            .values()
+        self.sorted_node_ids
+            .iter()
+            .filter_map(|node_id| self.nodes.get(node_id))
             .map(|entry| entry.status.clone())
-            .collect();
-        statuses.sort_by(|left, right| {
-            left.identity
-                .node_label
-                .cmp(&right.identity.node_label)
-                .then_with(|| left.identity.node_id.cmp(&right.identity.node_id))
-        });
-        statuses
+            .collect()
     }
 
     pub(super) fn list_node_summaries(&self) -> Vec<NodeListItem> {
-        let mut summaries: Vec<NodeListItem> = self
-            .nodes
-            .values()
+        self.sorted_node_ids
+            .iter()
+            .filter_map(|node_id| self.nodes.get(node_id))
             .map(|entry| entry.summary.clone())
-            .collect();
-        summaries.sort_by(|left, right| {
-            left.identity
-                .node_label
-                .cmp(&right.identity.node_label)
-                .then_with(|| left.identity.node_id.cmp(&right.identity.node_id))
-        });
-        summaries
+            .collect()
     }
 
     pub(super) fn get_status(&self, node_id: &str) -> Option<NodeStatus> {
@@ -221,12 +213,13 @@ impl Registry {
 
     pub(super) fn restore_statuses(&mut self, statuses: Vec<NodeStatus>) {
         self.nodes.clear();
+        self.sorted_node_ids.clear();
         for mut status in statuses {
             status.online = false;
             let summary = NodeListItem::from(&status);
             let node_id = status.identity.node_id.clone();
             self.nodes.insert(
-                node_id,
+                node_id.clone(),
                 NodeEntry {
                     status,
                     summary,
@@ -234,6 +227,21 @@ impl Registry {
                     control: None,
                 },
             );
+            self.sorted_node_ids.push(node_id);
         }
+        self.resort_node_ids();
+    }
+
+    fn resort_node_ids(&mut self) {
+        self.sorted_node_ids.sort_by(|left_id, right_id| {
+            let (Some(left), Some(right)) = (self.nodes.get(left_id), self.nodes.get(right_id)) else {
+                return left_id.cmp(right_id);
+            };
+            left.status
+                .identity
+                .node_label
+                .cmp(&right.status.identity.node_label)
+                .then_with(|| left.status.identity.node_id.cmp(&right.status.identity.node_id))
+        });
     }
 }
