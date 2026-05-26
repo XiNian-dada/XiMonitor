@@ -269,7 +269,11 @@ async fn record_totp_success(
     client_ip: std::net::IpAddr,
     audit_user: Option<String>,
 ) {
-    let mut event = NewAuditEvent::now(AuditEventType::TotpVerifySuccess, client_ip.to_string(), true);
+    let mut event = NewAuditEvent::now(
+        AuditEventType::TotpVerifySuccess,
+        client_ip.to_string(),
+        true,
+    );
     event.user = audit_user;
     event.user_agent = user_agent(headers);
     event.details = json!({

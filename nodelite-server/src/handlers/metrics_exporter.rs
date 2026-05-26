@@ -206,7 +206,12 @@ struct CacheHitMetrics {
 }
 
 fn render_bounded_queue_metrics(emitter: &mut MetricEmitter, metrics: BoundedQueueMetrics) {
-    emitter.counter(metrics.dropped_metric, metrics.dropped_help, &[], metrics.dropped_total);
+    emitter.counter(
+        metrics.dropped_metric,
+        metrics.dropped_help,
+        &[],
+        metrics.dropped_total,
+    );
     emitter.gauge(metrics.depth_metric, metrics.depth_help, &[], metrics.depth);
     emitter.gauge(
         metrics.capacity_metric,

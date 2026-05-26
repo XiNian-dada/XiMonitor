@@ -8,6 +8,7 @@ edition = "2024"
 license = "MIT"
 authors = ["NodeLite Contributors"]
 repository = "https://github.com/XiNian-dada/NodeLite"
+rust-version = "1.82"
 
 [workspace.dependencies]
 anyhow = "1.0"
