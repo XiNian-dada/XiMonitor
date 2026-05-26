@@ -294,7 +294,10 @@ mod tests {
 
     #[test]
     fn encode_ping_message_matches_wire_protocol_shape() {
-        assert_eq!(encode_ping_message(42), r#"{"type":"ping","nonce":42}"#);
+        assert_eq!(
+            encode_ping_message(42).expect("ping message should serialize"),
+            r#"{"type":"ping","nonce":42}"#
+        );
     }
 
     #[test]

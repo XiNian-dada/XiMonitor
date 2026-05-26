@@ -133,7 +133,7 @@ pub(crate) fn prune_outstanding_pings(
     }
 }
 
-pub(crate) fn encode_ping_message(nonce: u64) -> String {
+pub(crate) fn encode_ping_message(nonce: u64) -> Result<String, ProtocolError> {
     serde_json::to_string(&WireMessage::Ping(PingMessage { nonce }))
-        .expect("ping serialization should not fail")
+        .map_err(|error| anyhow!("failed to serialize ping message: {error}").into())
 }

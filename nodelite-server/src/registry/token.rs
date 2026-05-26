@@ -71,15 +71,15 @@ pub(super) fn authorized_node_from_entry(
 
 /// 用统一参数构造 Argon2id 实例。OWASP 2023 服务器档位:
 /// memory 19 MiB / iterations 2 / parallelism 1。
-fn argon2_instance() -> Argon2<'static> {
+fn argon2_instance() -> RegistryResult<Argon2<'static>> {
     let params = Params::new(
         ARGON2_MEMORY_KIB,
         ARGON2_ITERATIONS,
         ARGON2_PARALLELISM,
         None,
     )
-    .expect("argon2 parameters are constants picked from OWASP 2023 cheat sheet");
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+    .map_err(|error| RegistryError::internal("failed to build argon2 parameters", anyhow!(error)))?;
+    Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
 }
 
 /// 把明文 token 哈希成 Argon2id PHC 字符串。返回的字符串自带 salt + params,
@@ -91,7 +91,7 @@ pub(super) fn hash_token(token: &str) -> RegistryResult<String> {
     })?;
     let salt = SaltString::encode_b64(&salt_bytes)
         .map_err(|error| RegistryError::internal("failed to encode token salt", anyhow!(error)))?;
-    let hash = argon2_instance()
+    let hash = argon2_instance()?
         .hash_password(token.as_bytes(), &salt)
         .map_err(|error| RegistryError::internal("failed to hash token", anyhow!(error)))?;
     Ok(hash.to_string())
@@ -103,9 +103,10 @@ pub(super) fn verify_token(candidate: &str, phc: &str) -> bool {
     let Ok(parsed) = PasswordHash::new(phc) else {
         return false;
     };
-    argon2_instance()
-        .verify_password(candidate.as_bytes(), &parsed)
-        .is_ok()
+    let Ok(argon2) = argon2_instance() else {
+        return false;
+    };
+    argon2.verify_password(candidate.as_bytes(), &parsed).is_ok()
 }
 
 /// 把还在用明文 `token` 字段的旧 registry 条目迁移到 `token_hash`。

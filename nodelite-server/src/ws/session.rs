@@ -376,7 +376,7 @@ async fn handle_ping_tick(
     let nonce = loop_state.next_ping_nonce;
     loop_state.next_ping_nonce = loop_state.next_ping_nonce.saturating_add(1);
     loop_state.outstanding_pings.insert(nonce, Instant::now());
-    let ping = encode_ping_message(nonce);
+    let ping = encode_ping_message(nonce)?;
     sender
         .send(Message::Text(ping.into()))
         .await
