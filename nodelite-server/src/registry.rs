@@ -35,9 +35,9 @@ use tokio::sync::{RwLock, Semaphore};
 use tracing::warn;
 
 pub use self::error::{RegistryError, RegistryResult};
-#[allow(unused_imports)]
+#[cfg(test)]
+pub use self::render::{build_agent_server_url, build_github_release_base_url};
 pub use self::render::{
-    build_agent_server_url, build_github_release_base_url, build_install_bootstrap_url,
     build_install_script_url, default_agent_release_base_url, render_agent_config,
     render_install_command, render_upgrade_command,
 };

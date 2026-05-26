@@ -88,7 +88,8 @@ impl MetricsViewSlot {
         }
         if self
             .cached_at
-            .is_none_or(|cached_at| cached_at.elapsed() > max_age)
+            .map(|cached_at| cached_at.elapsed() > max_age)
+            .unwrap_or(true)
         {
             return None;
         }

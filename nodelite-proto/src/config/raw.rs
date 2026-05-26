@@ -376,7 +376,12 @@ impl RawServerConfigFile {
                 "auth.username and auth.password are required when auth.enable_2fa = true",
             ));
         }
-        if enable_2fa && totp_secret.as_deref().is_none_or(str::is_empty) {
+        if enable_2fa
+            && totp_secret
+                .as_deref()
+                .map(|secret| secret.is_empty())
+                .unwrap_or(true)
+        {
             return Err(ConfigError::new(
                 "auth.totp_secret is required when auth.enable_2fa = true",
             ));

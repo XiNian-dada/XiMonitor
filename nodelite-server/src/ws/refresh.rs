@@ -81,7 +81,8 @@ pub(crate) async fn ensure_current_token(
     if session.registry_revision == state.registry.registry_revision()
         && session
             .token_expires_at
-            .is_none_or(|expires_at| Utc::now() < expires_at)
+            .map(|expires_at| Utc::now() < expires_at)
+            .unwrap_or(true)
     {
         return true;
     }
@@ -108,7 +109,8 @@ pub(crate) async fn should_refresh_agent_token(
     if session.registry_revision == registry.registry_revision() {
         return Ok(session
             .token_expires_at
-            .is_none_or(|expires_at| expires_at <= refresh_after));
+            .map(|expires_at| expires_at <= refresh_after)
+            .unwrap_or(true));
     }
 
     let Some(status) = registry.token_status(&session.node_id).await else {
@@ -122,7 +124,8 @@ pub(crate) async fn should_refresh_agent_token(
     session.registry_revision = status.registry_revision;
     Ok(session
         .token_expires_at
-        .is_none_or(|expires_at| expires_at <= refresh_after))
+        .map(|expires_at| expires_at <= refresh_after)
+        .unwrap_or(true))
 }
 
 /// 通过当前在线会话把新 token 下发给 Agent。
