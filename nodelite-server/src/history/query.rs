@@ -1,9 +1,15 @@
 //! 历史查询聚合逻辑。
 
-use anyhow::Result;
 use chrono::{DateTime, TimeZone, Utc};
 use nodelite_proto::HistoryPoint;
 use rusqlite::{Connection, params};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub(super) enum HistoryQueryError {
+    #[error("sqlite history query failed")]
+    Sql(#[from] rusqlite::Error),
+}
 
 pub(crate) const HISTORY_QUERY_SQL: &str = r#"
         SELECT
@@ -27,7 +33,7 @@ pub(super) fn query_history(
     node_id: &str,
     since: DateTime<Utc>,
     max_points: usize,
-) -> Result<Vec<HistoryPoint>> {
+) -> Result<Vec<HistoryPoint>, HistoryQueryError> {
     query_history_between(connection, node_id, since, Utc::now(), max_points)
 }
 
@@ -38,7 +44,7 @@ pub(super) fn query_history_between(
     since: DateTime<Utc>,
     until: DateTime<Utc>,
     max_points: usize,
-) -> Result<Vec<HistoryPoint>> {
+) -> Result<Vec<HistoryPoint>, HistoryQueryError> {
     let max_points = max_points.max(1);
     let span_seconds = (until.timestamp() - since.timestamp()).max(1);
     let bucket_seconds = ((span_seconds as usize).div_ceil(max_points)).max(1) as i64;

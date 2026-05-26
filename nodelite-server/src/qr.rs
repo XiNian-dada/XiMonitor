@@ -1,12 +1,17 @@
 /// TOTP 绑定页使用的 QR Code SVG 生成器。
 ///
 /// 这里依赖成熟的 `qrcode` crate,避免维护自研 QR 编码、纠错和掩码逻辑。
-use anyhow::Context;
 use qrcode::{EcLevel, QrCode, render::svg};
+use thiserror::Error;
 
-pub(crate) fn qr_svg_for_text(text: &str) -> anyhow::Result<String> {
-    let code = QrCode::with_error_correction_level(text.as_bytes(), EcLevel::M)
-        .context("failed to encode TOTP QR code")?;
+#[derive(Debug, Error)]
+pub(crate) enum QrError {
+    #[error("failed to encode TOTP QR code")]
+    Encode(#[from] qrcode::types::QrError),
+}
+
+pub(crate) fn qr_svg_for_text(text: &str) -> Result<String, QrError> {
+    let code = QrCode::with_error_correction_level(text.as_bytes(), EcLevel::M)?;
     let svg = code
         .render::<svg::Color<'_>>()
         .min_dimensions(320, 320)

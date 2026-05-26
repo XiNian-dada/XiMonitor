@@ -4,10 +4,17 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use getrandom::fill as fill_random;
+use thiserror::Error;
 
 use crate::encoding::shell_quote;
 
 use super::SettingsActionResponse;
+
+#[derive(Debug, Error)]
+pub(super) enum SettingsHelperError {
+    #[error("failed to gather secure random bytes for TOTP secret")]
+    Random(#[from] getrandom::Error),
+}
 
 pub(super) fn settings_json_error(status: StatusCode, message: impl Into<String>) -> Response {
     (
@@ -130,7 +137,7 @@ fn server_update_install_root(config: &nodelite_proto::ServerConfig) -> PathBuf 
     current
 }
 
-pub(super) fn generate_totp_secret() -> anyhow::Result<String> {
+pub(super) fn generate_totp_secret() -> Result<String, SettingsHelperError> {
     let mut bytes = [0_u8; 20];
     fill_random(&mut bytes)?;
     Ok(base32::encode(

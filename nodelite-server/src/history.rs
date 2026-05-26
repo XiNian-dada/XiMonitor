@@ -34,7 +34,7 @@ use tracing::{error, warn};
 use self::init::{initialize_database, open_read_connection};
 #[cfg(test)]
 use self::query::HISTORY_QUERY_SQL;
-use self::query::{query_history, query_history_between};
+use self::query::{HistoryQueryError, query_history, query_history_between};
 use self::writer::{WriterContext, build_history_point, run_history_writer};
 #[cfg(test)]
 use self::writer::{sqlite_busy_retry_delay, write_history_point};
@@ -83,6 +83,12 @@ impl std::error::Error for HistoryError {
             Self::Query(error) | Self::TaskFailed(error) => Some(error.root_cause()),
             Self::ConnectionNotInitialized => None,
         }
+    }
+}
+
+impl From<HistoryQueryError> for HistoryError {
+    fn from(error: HistoryQueryError) -> Self {
+        Self::Query(anyhow!(error))
     }
 }
 
@@ -335,7 +341,7 @@ impl HistoryStore {
                 return Err(HistoryError::ConnectionNotInitialized);
             };
             query_history(connection, &node_id, since, clamped_max_points)
-                .map_err(HistoryError::Query)
+                .map_err(HistoryError::from)
         })
         .await
         .map_err(|error| HistoryError::TaskFailed(anyhow!("history query task failed: {error}")))?
@@ -377,7 +383,7 @@ impl HistoryStore {
                 clamped_end,
                 clamped_max_points,
             )
-            .map_err(HistoryError::Query)
+            .map_err(HistoryError::from)
         })
         .await
         .map_err(|error| {

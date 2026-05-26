@@ -1,14 +1,34 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
 use clap::{Parser, Subcommand};
 use nodelite_proto::ServerConfig;
+use thiserror::Error;
 
 use crate::load_server_config;
 use crate::registry::{
     IssueNodeRequest, IssueNodeResult, build_install_script_url, default_agent_release_base_url,
     issue_node, render_agent_config, render_install_command, render_upgrade_command,
 };
+
+/// 顶层 server CLI 对外暴露的稳定错误边界。
+#[derive(Debug, Error)]
+pub enum CliError {
+    #[error("failed to load server config")]
+    LoadConfig {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("server command failed")]
+    Registry {
+        #[from]
+        source: crate::registry::RegistryError,
+    },
+    #[error("server startup failed")]
+    RunServer {
+        #[source]
+        source: anyhow::Error,
+    },
+}
 
 /// 顶层命令行参数。
 #[derive(Debug, Parser)]
@@ -52,8 +72,13 @@ struct IssuedNodeBundle {
 }
 
 /// `server issue-node`:创建/更新节点并打印对应的 agent.toml 与安装命令。
-pub(crate) async fn issue_node_command(config_path: &Path, args: NodeCommandArgs) -> Result<()> {
-    let config = load_server_config(config_path).await?;
+pub(crate) async fn issue_node_command(
+    config_path: &Path,
+    args: NodeCommandArgs,
+) -> std::result::Result<(), CliError> {
+    let config = load_server_config(config_path)
+        .await
+        .map_err(|source| CliError::LoadConfig { source })?;
     let bundle = issue_node_bundle(&config, &args).await?;
     let agent_config = render_agent_config(
         &config.public_base_url,
@@ -90,16 +115,25 @@ pub(crate) async fn issue_node_command(config_path: &Path, args: NodeCommandArgs
 }
 
 /// `server install-agent`:只打印安装命令,适合管道式使用。
-pub(crate) async fn install_agent_command(config_path: &Path, args: NodeCommandArgs) -> Result<()> {
-    let config = load_server_config(config_path).await?;
+pub(crate) async fn install_agent_command(
+    config_path: &Path,
+    args: NodeCommandArgs,
+) -> std::result::Result<(), CliError> {
+    let config = load_server_config(config_path)
+        .await
+        .map_err(|source| CliError::LoadConfig { source })?;
     let bundle = issue_node_bundle(&config, &args).await?;
     println!("{}", bundle.install_command);
     Ok(())
 }
 
 /// `server upgrade-agent`:打印就地升级现有 Agent 的命令。
-pub(crate) async fn upgrade_agent_command(config_path: &Path) -> Result<()> {
-    let config = load_server_config(config_path).await?;
+pub(crate) async fn upgrade_agent_command(
+    config_path: &Path,
+) -> std::result::Result<(), CliError> {
+    let config = load_server_config(config_path)
+        .await
+        .map_err(|source| CliError::LoadConfig { source })?;
     let agent_release_base_url = default_agent_release_base_url()?;
     let upgrade_command = render_upgrade_command(&config.public_base_url, &agent_release_base_url)?;
     println!("{upgrade_command}");
@@ -110,7 +144,7 @@ pub(crate) async fn upgrade_agent_command(config_path: &Path) -> Result<()> {
 async fn issue_node_bundle(
     config: &ServerConfig,
     args: &NodeCommandArgs,
-) -> Result<IssuedNodeBundle> {
+) -> std::result::Result<IssuedNodeBundle, CliError> {
     let issued = issue_node(
         config.node_registry_path.as_path(),
         IssueNodeRequest {

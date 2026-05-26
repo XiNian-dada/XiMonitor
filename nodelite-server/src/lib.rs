@@ -42,7 +42,6 @@ mod ws;
 #[path = "lib_tests.rs"]
 mod tests;
 
-use anyhow::Result;
 use clap::Parser;
 
 #[allow(unused_imports)]
@@ -53,11 +52,12 @@ pub(crate) use background::uses_insecure_remote_public_base_url;
 pub(crate) use startup::PROTECTED_CACHE_CONTROL;
 #[allow(unused_imports)]
 pub(crate) use startup::{load_server_config, set_protected_response_headers};
+pub use crate::cli::CliError;
 
 use crate::cli::{Cli, Command, install_agent_command, issue_node_command, upgrade_agent_command};
 
 /// CLI 入口:根据子命令分发到具体动作。
-pub async fn cli_main() -> Result<()> {
+pub async fn cli_main() -> std::result::Result<(), CliError> {
     startup::init_tracing();
 
     let cli = Cli::parse();
@@ -67,6 +67,8 @@ pub async fn cli_main() -> Result<()> {
             install_agent_command(cli.config.as_path(), args).await
         }
         Some(Command::UpgradeAgent) => upgrade_agent_command(cli.config.as_path()).await,
-        None => startup::run_server(cli.config.as_path()).await,
+        None => startup::run_server(cli.config.as_path())
+            .await
+            .map_err(|source| CliError::RunServer { source }),
     }
 }
