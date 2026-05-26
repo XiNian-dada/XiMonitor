@@ -300,7 +300,9 @@ impl AgentLogShard {
         let mut removed = RemovedNodeStats::default();
         for entry in buffer {
             removed.entries += 1;
-            removed.estimated_bytes = removed.estimated_bytes.saturating_add(entry.estimated_bytes);
+            removed.estimated_bytes = removed
+                .estimated_bytes
+                .saturating_add(entry.estimated_bytes);
         }
         removed
     }
@@ -546,11 +548,17 @@ mod tests {
         let sample = store.list("node-064", MAX_BATCH_ENTRIES).await;
         assert_eq!(sample.len(), MAX_BATCH_ENTRIES);
         assert_eq!(
-            sample.first().expect("sample should contain oldest kept entry").message,
+            sample
+                .first()
+                .expect("sample should contain oldest kept entry")
+                .message,
             "node-064-entry-000"
         );
         assert_eq!(
-            sample.last().expect("sample should contain newest kept entry").message,
+            sample
+                .last()
+                .expect("sample should contain newest kept entry")
+                .message,
             format!("node-064-entry-{:03}", MAX_BATCH_ENTRIES - 1)
         );
     }

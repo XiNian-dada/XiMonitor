@@ -128,4 +128,3 @@ mod tests {
         assert!(slot.get(1, None).is_some());
     }
 }
-

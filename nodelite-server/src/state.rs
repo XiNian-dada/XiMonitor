@@ -879,12 +879,18 @@ mod tests {
         let _ = shared.metrics_text(&readiness).await;
         assert_eq!(shared.api_overview_cache_build_count(), 1);
         assert_eq!(shared.metrics_cache_build_count(), 1);
-        let _ = shared.nodes_json_bytes().await.expect("nodes rebuilds again");
+        let _ = shared
+            .nodes_json_bytes()
+            .await
+            .expect("nodes rebuilds again");
         assert_eq!(shared.api_nodes_cache_build_count(), 3);
 
         // 真正的结构性变更仍然连带使三视图失效。
         shared.mark_disconnected("hk-01", session_id).await;
-        let _ = shared.overview_json_bytes().await.expect("overview rebuilds");
+        let _ = shared
+            .overview_json_bytes()
+            .await
+            .expect("overview rebuilds");
         let _ = shared.metrics_text(&readiness).await;
         let _ = shared.nodes_json_bytes().await.expect("nodes rebuilds");
         assert_eq!(shared.api_overview_cache_build_count(), 2);

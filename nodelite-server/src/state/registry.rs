@@ -64,7 +64,8 @@ impl Registry {
         entry.control = None;
         entry.summary = NodeListItem::from(&entry.status);
         if inserted {
-            self.sorted_node_ids.push(entry.status.identity.node_id.clone());
+            self.sorted_node_ids
+                .push(entry.status.identity.node_id.clone());
         }
         self.resort_node_ids();
     }
@@ -244,14 +245,20 @@ impl Registry {
 
     fn resort_node_ids(&mut self) {
         self.sorted_node_ids.sort_by(|left_id, right_id| {
-            let (Some(left), Some(right)) = (self.nodes.get(left_id), self.nodes.get(right_id)) else {
+            let (Some(left), Some(right)) = (self.nodes.get(left_id), self.nodes.get(right_id))
+            else {
                 return left_id.cmp(right_id);
             };
             left.status
                 .identity
                 .node_label
                 .cmp(&right.status.identity.node_label)
-                .then_with(|| left.status.identity.node_id.cmp(&right.status.identity.node_id))
+                .then_with(|| {
+                    left.status
+                        .identity
+                        .node_id
+                        .cmp(&right.status.identity.node_id)
+                })
         });
     }
 }
