@@ -35,76 +35,39 @@ pub(crate) async fn install_bootstrap(
     request: Request,
 ) -> Response {
     let client_ip = resolve_client_ip(&state.shared.config().trusted_proxies, peer_addr, &headers);
+    let audit_user_agent = request_user_agent(&request);
     if let Err(retry_after_secs) = state.install_admission.check(client_ip) {
-        let mut event = NewAuditEvent::now(
-            AuditEventType::RateLimitExceeded,
-            client_ip.to_string(),
-            false,
-        );
-        event.user_agent = request
-            .headers()
-            .get(header::USER_AGENT)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        event.details = json!({
-            "endpoint": "/install/bootstrap",
-            "retry_after_secs": retry_after_secs,
-            "reason": "install_auth_block",
-        });
-        state.audit_log.record_best_effort(event).await;
+        record_install_block(&state, client_ip, &audit_user_agent, retry_after_secs).await;
         return install_blocked_response(retry_after_secs);
     }
 
     let Some(token) = bearer_token_from_request(&request) else {
-        state.install_admission.record_auth_failure(client_ip);
-        let mut event =
-            NewAuditEvent::now(AuditEventType::TokenInvalid, client_ip.to_string(), false);
-        event.user_agent = request
-            .headers()
-            .get(header::USER_AGENT)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        event.details = json!({
-            "endpoint": "/install/bootstrap",
-            "reason": "missing_install_token",
-        });
-        state.audit_log.record_best_effort(event).await;
+        record_install_token_failure(&state, client_ip, &audit_user_agent, "missing_install_token")
+            .await;
         return install_unauthorized_response("missing install token");
     };
 
     if !is_well_formed_install_token(token) {
-        state.install_admission.record_auth_failure(client_ip);
-        let mut event =
-            NewAuditEvent::now(AuditEventType::TokenInvalid, client_ip.to_string(), false);
-        event.user_agent = request
-            .headers()
-            .get(header::USER_AGENT)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        event.details = json!({
-            "endpoint": "/install/bootstrap",
-            "reason": "malformed_install_token",
-        });
-        state.audit_log.record_best_effort(event).await;
+        record_install_token_failure(
+            &state,
+            client_ip,
+            &audit_user_agent,
+            "malformed_install_token",
+        )
+        .await;
         return install_unauthorized_response("invalid install token");
     }
 
     let consumed = match state.registry.consume_install_token(token).await {
         Ok(Some(consumed)) => consumed,
         Ok(None) => {
-            state.install_admission.record_auth_failure(client_ip);
-            let mut event =
-                NewAuditEvent::now(AuditEventType::TokenInvalid, client_ip.to_string(), false);
-            event.user_agent = request
-                .headers()
-                .get(header::USER_AGENT)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string);
-            event.details = json!({
-                "endpoint": "/install/bootstrap",
-                "reason": "unknown_install_token",
-            });
-            state.audit_log.record_best_effort(event).await;
+            record_install_token_failure(
+                &state,
+                client_ip,
+                &audit_user_agent,
+                "unknown_install_token",
+            )
+            .await;
             return install_unauthorized_response("invalid install token");
         }
         Err(error) => {
@@ -122,7 +85,13 @@ pub(crate) async fn install_bootstrap(
     };
 
     state.install_admission.clear_auth_failures(client_ip);
+    render_agent_bootstrap_response(&state, consumed)
+}
 
+fn render_agent_bootstrap_response(
+    state: &AppState,
+    consumed: crate::registry::ConsumedInstall,
+) -> Response {
     match render_agent_config(
         &state.shared.config().public_base_url,
         &consumed.node,
@@ -150,6 +119,50 @@ pub(crate) async fn install_bootstrap(
                 .into_response()
         }
     }
+}
+
+async fn record_install_block(
+    state: &AppState,
+    client_ip: std::net::IpAddr,
+    audit_user_agent: &Option<String>,
+    retry_after_secs: u64,
+) {
+    let mut event = NewAuditEvent::now(
+        AuditEventType::RateLimitExceeded,
+        client_ip.to_string(),
+        false,
+    );
+    event.user_agent = audit_user_agent.clone();
+    event.details = json!({
+        "endpoint": "/install/bootstrap",
+        "retry_after_secs": retry_after_secs,
+        "reason": "install_auth_block",
+    });
+    state.audit_log.record_best_effort(event).await;
+}
+
+async fn record_install_token_failure(
+    state: &AppState,
+    client_ip: std::net::IpAddr,
+    audit_user_agent: &Option<String>,
+    reason: &'static str,
+) {
+    state.install_admission.record_auth_failure(client_ip);
+    let mut event = NewAuditEvent::now(AuditEventType::TokenInvalid, client_ip.to_string(), false);
+    event.user_agent = audit_user_agent.clone();
+    event.details = json!({
+        "endpoint": "/install/bootstrap",
+        "reason": reason,
+    });
+    state.audit_log.record_best_effort(event).await;
+}
+
+fn request_user_agent(request: &Request) -> Option<String> {
+    request
+        .headers()
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
 }
 
 fn install_unauthorized_response(detail: &'static str) -> Response {
