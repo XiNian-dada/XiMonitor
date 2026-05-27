@@ -138,7 +138,7 @@ struct RawAuditSection {
     log_rate_limit: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RawAlertsSection {
     #[serde(default)]
@@ -275,18 +275,6 @@ impl Default for RawAuditSection {
             log_failed_auth: default_audit_log_failed_auth(),
             log_token_events: default_audit_log_token_events(),
             log_rate_limit: default_audit_log_rate_limit(),
-        }
-    }
-}
-
-impl Default for RawAlertsSection {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            smtp: RawAlertSmtpSection::default(),
-            webhook: RawAlertWebhookSection::default(),
-            rules: Vec::new(),
-            inspection: RawInspectionSection::default(),
         }
     }
 }

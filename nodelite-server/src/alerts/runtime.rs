@@ -299,10 +299,15 @@ mod tests {
 
     #[test]
     fn inspection_requires_enabled_delivery_channel() {
-        let mut config = AlertingConfig::default();
-        config.enabled = true;
-        config.inspection.enabled = true;
-        config.inspection.delivery = vec![AlertChannel::Webhook];
+        let mut config = AlertingConfig {
+            enabled: true,
+            inspection: nodelite_proto::InspectionConfig {
+                enabled: true,
+                delivery: vec![AlertChannel::Webhook],
+                ..nodelite_proto::InspectionConfig::default()
+            },
+            ..AlertingConfig::default()
+        };
 
         assert!(!should_check_inspection(&config));
         config.webhook.enabled = true;
