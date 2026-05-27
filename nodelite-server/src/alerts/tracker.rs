@@ -5,6 +5,8 @@ use nodelite_proto::AlertRuleConfig;
 
 use super::{AlertMetricReading, EvaluatedRule};
 
+const DELIVERY_FAILURE_RETRY_DELAY_MINUTES: i64 = 5;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AlertEventKind {
     Triggered,
@@ -131,6 +133,20 @@ impl AlertStateTracker {
 
         events
     }
+
+    pub(crate) fn record_delivery_failure(&mut self, event: &AlertEvent, now: DateTime<Utc>) {
+        if event.kind != AlertEventKind::Triggered {
+            return;
+        }
+        let key = AlertInstanceKey {
+            rule_id: event.rule.id.clone(),
+            node_id: event.node_id.clone(),
+        };
+        let Some(active) = self.active.get_mut(&key) else {
+            return;
+        };
+        active.last_notified_at = retry_notified_at(event.rule.cooldown_minutes, now);
+    }
 }
 
 fn should_repeat_alert(
@@ -140,6 +156,12 @@ fn should_repeat_alert(
 ) -> bool {
     let cooldown_minutes = i64::try_from(cooldown_minutes).unwrap_or(i64::MAX);
     now.signed_duration_since(last_notified_at) >= Duration::minutes(cooldown_minutes)
+}
+
+fn retry_notified_at(cooldown_minutes: u64, now: DateTime<Utc>) -> DateTime<Utc> {
+    let cooldown_minutes = i64::try_from(cooldown_minutes).unwrap_or(i64::MAX);
+    let retry_offset = cooldown_minutes.saturating_sub(DELIVERY_FAILURE_RETRY_DELAY_MINUTES);
+    now - Duration::minutes(retry_offset)
 }
 
 fn triggered_event(
@@ -226,6 +248,26 @@ mod tests {
         assert_eq!(repeated[0].kind, AlertEventKind::Triggered);
         assert_eq!(
             repeated[0].reading.as_ref().map(|reading| reading.value),
+            Some(93)
+        );
+    }
+
+    #[test]
+    fn record_delivery_failure_allows_early_retry() {
+        let now = Utc::now();
+        let rules = vec![rule(true)];
+        let mut tracker = AlertStateTracker::new();
+        let first = tracker.update(&rules, &[matched(91)], now);
+
+        tracker.record_delivery_failure(&first[0], now);
+        let retry_too_soon = tracker.update(&rules, &[matched(92)], now + Duration::minutes(4));
+        let retry = tracker.update(&rules, &[matched(93)], now + Duration::minutes(5));
+
+        assert!(retry_too_soon.is_empty());
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].kind, AlertEventKind::Triggered);
+        assert_eq!(
+            retry[0].reading.as_ref().map(|reading| reading.value),
             Some(93)
         );
     }

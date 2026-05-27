@@ -63,6 +63,7 @@ async fn run_alert_runtime(
                     for event in tracker.update(&config.rules, &matches, now) {
                         log_alert_event(&event);
                         if let Err(error) = deliver_alert_event(&config, &event).await {
+                            tracker.record_delivery_failure(&event, now);
                             warn!(
                                 error = ?error,
                                 webhook = %webhook_endpoint_label(&config.webhook.url),

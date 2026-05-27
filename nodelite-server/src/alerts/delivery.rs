@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,7 +12,7 @@ use sha2::Sha256;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use url::Url;
@@ -21,6 +22,8 @@ use super::{AlertEvent, AlertEventKind, InspectionReport};
 mod smtp;
 
 const WEBHOOK_TIMEOUT: Duration = Duration::from_secs(10);
+const DELIVERY_MAX_ATTEMPTS: usize = 3;
+const DELIVERY_RETRY_DELAY: Duration = Duration::from_millis(50);
 const MAX_RESPONSE_HEADER_BYTES: usize = 32 * 1024;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -55,6 +58,23 @@ pub(crate) enum AlertDeliveryError {
     Smtp(String),
     #[error("smtp message contains an invalid header value")]
     InvalidMailHeader,
+}
+
+impl AlertDeliveryError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Timeout | Self::Io(_) | Self::Tls(_) | Self::InvalidResponse => true,
+            Self::HttpStatus { status } => *status == 429 || *status >= 500,
+            Self::SmtpTimeout | Self::Smtp(_) => true,
+            Self::InvalidWebhookUrl(_)
+            | Self::MissingWebhookHost
+            | Self::UnsupportedWebhookScheme
+            | Self::Signature(_)
+            | Self::Serialize(_)
+            | Self::ResponseTooLarge
+            | Self::InvalidMailHeader => false,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -129,14 +149,15 @@ pub(crate) async fn deliver_alert_event(
 ) -> Result<(), AlertDeliveryError> {
     let mut first_error = None;
     if should_send_webhook(config, event) {
+        let notification = notification_from_event(event);
         if let Err(error) =
-            send_webhook_notification(&config.webhook, &notification_from_event(event)).await
+            retry_delivery(|| send_webhook_notification(&config.webhook, &notification)).await
         {
             first_error = Some(error);
         }
     }
     if should_send_smtp(config, event)
-        && let Err(error) = smtp::send_alert_event(&config.smtp, event).await
+        && let Err(error) = retry_delivery(|| smtp::send_alert_event(&config.smtp, event)).await
         && first_error.is_none()
     {
         first_error = Some(error);
@@ -152,12 +173,15 @@ pub(crate) async fn deliver_inspection_summary(
     let mut first_error = None;
     if should_send_inspection_webhook(config) {
         let notification = inspection_notification(summary);
-        if let Err(error) = send_webhook_notification(&config.webhook, &notification).await {
+        if let Err(error) =
+            retry_delivery(|| send_webhook_notification(&config.webhook, &notification)).await
+        {
             first_error = Some(error);
         }
     }
     if should_send_inspection_smtp(config)
-        && let Err(error) = smtp::send_inspection_summary(&config.smtp, summary).await
+        && let Err(error) =
+            retry_delivery(|| smtp::send_inspection_summary(&config.smtp, summary)).await
         && first_error.is_none()
     {
         first_error = Some(error);
@@ -170,6 +194,24 @@ fn delivery_result(first_error: Option<AlertDeliveryError>) -> Result<(), AlertD
     match first_error {
         Some(error) => Err(error),
         None => Ok(()),
+    }
+}
+
+async fn retry_delivery<F, Fut>(mut operation: F) -> Result<(), AlertDeliveryError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(), AlertDeliveryError>>,
+{
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match operation().await {
+            Ok(()) => return Ok(()),
+            Err(error) if attempts >= DELIVERY_MAX_ATTEMPTS || !error.is_retryable() => {
+                return Err(error);
+            }
+            Err(_) => sleep(DELIVERY_RETRY_DELAY).await,
+        }
     }
 }
 
@@ -431,6 +473,9 @@ fn parse_status(response_headers: &str) -> Result<u16, AlertDeliveryError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use chrono::Utc;
     use nodelite_proto::{
         AlertChannel, AlertComparator, AlertMetric, AlertRuleConfig, AlertScopeMode, AlertSeverity,
@@ -440,7 +485,8 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{
-        InspectionSummary, deliver_alert_event, deliver_inspection_summary, webhook_endpoint_label,
+        AlertDeliveryError, InspectionSummary, deliver_alert_event, deliver_inspection_summary,
+        retry_delivery, webhook_endpoint_label,
     };
     use crate::alerts::{AlertEvent, AlertEventKind, AlertMetricReading, InspectionReport};
 
@@ -546,6 +592,43 @@ mod tests {
             webhook_endpoint_label("https://hooks.example.com/path?token=secret"),
             "https://hooks.example.com/path"
         );
+    }
+
+    #[tokio::test]
+    async fn retry_delivery_retries_retryable_errors() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+
+        retry_delivery(|| {
+            let attempts = Arc::clone(&attempts);
+            async move {
+                if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                    return Err(AlertDeliveryError::HttpStatus { status: 503 });
+                }
+                Ok(())
+            }
+        })
+        .await
+        .expect("delivery should eventually succeed");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_delivery_does_not_retry_invalid_payloads() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+
+        let error = retry_delivery(|| {
+            let attempts = Arc::clone(&attempts);
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(AlertDeliveryError::InvalidMailHeader)
+            }
+        })
+        .await
+        .expect_err("invalid payload should fail");
+
+        assert!(matches!(error, AlertDeliveryError::InvalidMailHeader));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
     fn sample_event() -> AlertEvent {
