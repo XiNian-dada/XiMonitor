@@ -11,17 +11,27 @@ use tokio_rustls::rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 
 use crate::alerts::AlertEvent;
 
-use super::AlertDeliveryError;
+use super::{AlertDeliveryError, InspectionSummary};
 
 const SMTP_TIMEOUT: Duration = Duration::from_secs(15);
 const SMTP_MAX_RESPONSE_BYTES: usize = 16 * 1024;
 const SMTP_HELO_NAME: &str = "nodelite.local";
 
-pub(super) async fn send_smtp(
+pub(super) async fn send_alert_event(
     config: &AlertSmtpConfig,
     event: &AlertEvent,
 ) -> Result<(), AlertDeliveryError> {
-    let message = build_message(config, event)?;
+    let message = build_alert_message(config, event)?;
+    timeout(SMTP_TIMEOUT, send_smtp_inner(config, message))
+        .await
+        .map_err(|_| AlertDeliveryError::SmtpTimeout)?
+}
+
+pub(super) async fn send_inspection_summary(
+    config: &AlertSmtpConfig,
+    summary: &InspectionSummary<'_>,
+) -> Result<(), AlertDeliveryError> {
+    let message = build_inspection_message(config, summary)?;
     timeout(SMTP_TIMEOUT, send_smtp_inner(config, message))
         .await
         .map_err(|_| AlertDeliveryError::SmtpTimeout)?
@@ -210,7 +220,7 @@ fn validate_smtp_config(config: &AlertSmtpConfig) -> Result<(), AlertDeliveryErr
     Ok(())
 }
 
-fn build_message(
+fn build_alert_message(
     config: &AlertSmtpConfig,
     event: &AlertEvent,
 ) -> Result<String, AlertDeliveryError> {
@@ -232,11 +242,30 @@ fn build_message(
         recipients,
         subject,
         event.occurred_at.to_rfc2822(),
-        message_body(event),
+        alert_message_body(event),
     ))
 }
 
-fn message_body(event: &AlertEvent) -> String {
+fn build_inspection_message(
+    config: &AlertSmtpConfig,
+    summary: &InspectionSummary<'_>,
+) -> Result<String, AlertDeliveryError> {
+    let subject = format!("[NodeLite] Daily inspection {}", summary.local_date);
+    validate_header_value(&subject)?;
+    let recipients = config.recipients.join(", ");
+    validate_header_value(&recipients)?;
+
+    Ok(format!(
+        "From: {}\r\nTo: {}\r\nSubject: {}\r\nDate: {}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{}",
+        config.sender,
+        recipients,
+        subject,
+        summary.occurred_at.to_rfc2822(),
+        inspection_message_body(summary),
+    ))
+}
+
+fn alert_message_body(event: &AlertEvent) -> String {
     let mut body = format!(
         "NodeLite alert {}\n\nRule: {} ({})\nSeverity: {:?}\nNode: {} ({})\nTime: {}\n",
         event.kind.as_str(),
@@ -252,6 +281,39 @@ fn message_body(event: &AlertEvent) -> String {
             "Metric: {:?}\nValue: {}\nThreshold: {}\n",
             reading.metric, reading.value, reading.threshold
         ));
+    }
+    body
+}
+
+fn inspection_message_body(summary: &InspectionSummary<'_>) -> String {
+    let report = summary.report;
+    let mut body = format!(
+        "NodeLite daily inspection summary\n\nDate: {}\nLookback: {}h\nGenerated: {}\n\nTotal nodes: {}\nOffline: {}\nHigh latency: {}\nCPU hot: {}\nMemory hot: {}\n",
+        summary.local_date,
+        summary.lookback_hours,
+        summary.occurred_at.to_rfc3339(),
+        report.total_nodes,
+        report.offline_nodes,
+        report.latency_nodes,
+        report.cpu_hot_nodes,
+        report.memory_hot_nodes,
+    );
+    if !report.highlights.is_empty() {
+        body.push_str("\nHighlights:\n");
+        for highlight in report.highlights.iter().take(20) {
+            body.push_str(&format!(
+                "- {} ({}): {}\n",
+                highlight.node_label,
+                highlight.node_id,
+                highlight.reasons.join(", ")
+            ));
+        }
+        if report.highlights.len() > 20 {
+            body.push_str(&format!(
+                "- ... {} more nodes\n",
+                report.highlights.len() - 20
+            ));
+        }
     }
     body
 }
@@ -289,7 +351,8 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
 
-    use super::{build_message, dot_stuff, send_smtp};
+    use super::{build_alert_message, build_inspection_message, dot_stuff, send_alert_event};
+    use crate::alerts::evaluator::InspectionHighlight;
     use crate::alerts::{AlertEvent, AlertEventKind, AlertMetricReading};
 
     #[tokio::test]
@@ -304,7 +367,7 @@ mod tests {
         });
         let config = smtp_config(addr.port());
 
-        send_smtp(&config, &sample_event())
+        send_alert_event(&config, &sample_event())
             .await
             .expect("smtp should send");
         let session = server.await.expect("fake smtp should join");
@@ -340,12 +403,41 @@ mod tests {
         let mut event = sample_event();
         event.node_label = "good\r\nBcc: bad@example.com".to_string();
 
-        assert!(build_message(&smtp_config(25), &event).is_err());
+        assert!(build_alert_message(&smtp_config(25), &event).is_err());
     }
 
     #[test]
     fn dot_stuff_prefixes_lines_starting_with_dot() {
         assert_eq!(dot_stuff("first\n.second"), "first\r\n..second");
+    }
+
+    #[test]
+    fn build_inspection_message_includes_totals_and_highlights() {
+        let report = crate::alerts::InspectionReport {
+            total_nodes: 2,
+            offline_nodes: 1,
+            latency_nodes: 1,
+            cpu_hot_nodes: 0,
+            memory_hot_nodes: 0,
+            highlights: vec![InspectionHighlight {
+                node_id: "hk-01".to_string(),
+                node_label: "Hong Kong".to_string(),
+                reasons: vec!["offline".to_string(), "latency".to_string()],
+            }],
+        };
+        let summary = super::InspectionSummary {
+            occurred_at: Utc::now(),
+            local_date: chrono::NaiveDate::from_ymd_opt(2026, 5, 27).expect("date should be valid"),
+            lookback_hours: 24,
+            report: &report,
+        };
+
+        let message =
+            build_inspection_message(&smtp_config(25), &summary).expect("message should build");
+
+        assert!(message.contains("Subject: [NodeLite] Daily inspection 2026-05-27"));
+        assert!(message.contains("Total nodes: 2"));
+        assert!(message.contains("- Hong Kong (hk-01): offline, latency"));
     }
 
     async fn run_fake_smtp(socket: tokio::net::TcpStream) -> SmtpSession {

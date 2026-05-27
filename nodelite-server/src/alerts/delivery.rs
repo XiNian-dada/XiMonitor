@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use hmac::{Hmac, Mac};
 use nodelite_proto::{
     AlertChannel, AlertMetric, AlertSeverity, AlertSmtpConfig, AlertWebhookConfig, AlertingConfig,
@@ -16,7 +16,7 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use url::Url;
 
-use super::{AlertEvent, AlertEventKind};
+use super::{AlertEvent, AlertEventKind, InspectionReport};
 
 mod smtp;
 
@@ -88,23 +88,85 @@ struct AlertReadingNotification {
     threshold: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InspectionSummary<'a> {
+    pub(crate) occurred_at: DateTime<Utc>,
+    pub(crate) local_date: NaiveDate,
+    pub(crate) lookback_hours: u64,
+    pub(crate) report: &'a InspectionReport,
+}
+
+#[derive(Debug, Serialize)]
+struct InspectionSummaryNotification<'a> {
+    version: u8,
+    source: &'static str,
+    event: &'static str,
+    occurred_at: DateTime<Utc>,
+    local_date: NaiveDate,
+    lookback_hours: u64,
+    totals: InspectionTotalsNotification,
+    highlights: Vec<InspectionHighlightNotification<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct InspectionTotalsNotification {
+    total_nodes: usize,
+    offline_nodes: usize,
+    latency_nodes: usize,
+    cpu_hot_nodes: usize,
+    memory_hot_nodes: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct InspectionHighlightNotification<'a> {
+    node: AlertNodeNotification<'a>,
+    reasons: &'a [String],
+}
+
 pub(crate) async fn deliver_alert_event(
     config: &AlertingConfig,
     event: &AlertEvent,
 ) -> Result<(), AlertDeliveryError> {
     let mut first_error = None;
     if should_send_webhook(config, event) {
-        if let Err(error) = send_webhook(&config.webhook, event).await {
+        if let Err(error) =
+            send_webhook_notification(&config.webhook, &notification_from_event(event)).await
+        {
             first_error = Some(error);
         }
     }
     if should_send_smtp(config, event)
-        && let Err(error) = smtp::send_smtp(&config.smtp, event).await
+        && let Err(error) = smtp::send_alert_event(&config.smtp, event).await
         && first_error.is_none()
     {
         first_error = Some(error);
     }
 
+    delivery_result(first_error)
+}
+
+pub(crate) async fn deliver_inspection_summary(
+    config: &AlertingConfig,
+    summary: &InspectionSummary<'_>,
+) -> Result<(), AlertDeliveryError> {
+    let mut first_error = None;
+    if should_send_inspection_webhook(config) {
+        let notification = inspection_notification(summary);
+        if let Err(error) = send_webhook_notification(&config.webhook, &notification).await {
+            first_error = Some(error);
+        }
+    }
+    if should_send_inspection_smtp(config)
+        && let Err(error) = smtp::send_inspection_summary(&config.smtp, summary).await
+        && first_error.is_none()
+    {
+        first_error = Some(error);
+    }
+
+    delivery_result(first_error)
+}
+
+fn delivery_result(first_error: Option<AlertDeliveryError>) -> Result<(), AlertDeliveryError> {
     match first_error {
         Some(error) => Err(error),
         None => Ok(()),
@@ -137,12 +199,20 @@ fn should_send_smtp(config: &AlertingConfig, event: &AlertEvent) -> bool {
     config.smtp.enabled && event.rule.delivery.contains(&AlertChannel::Smtp)
 }
 
-async fn send_webhook(
+fn should_send_inspection_webhook(config: &AlertingConfig) -> bool {
+    config.webhook.enabled && config.inspection.delivery.contains(&AlertChannel::Webhook)
+}
+
+fn should_send_inspection_smtp(config: &AlertingConfig) -> bool {
+    config.smtp.enabled && config.inspection.delivery.contains(&AlertChannel::Smtp)
+}
+
+async fn send_webhook_notification<T: Serialize>(
     config: &AlertWebhookConfig,
-    event: &AlertEvent,
+    notification: &T,
 ) -> Result<(), AlertDeliveryError> {
     let url = Url::parse(&config.url)?;
-    let payload = serde_json::to_vec(&notification_from_event(event))?;
+    let payload = serde_json::to_vec(notification)?;
     timeout(
         WEBHOOK_TIMEOUT,
         send_http_post(url, &payload, config.secret.as_deref()),
@@ -174,6 +244,38 @@ fn notification_from_event(event: &AlertEvent) -> AlertNotification<'_> {
                 value: reading.value,
                 threshold: reading.threshold,
             }),
+    }
+}
+
+fn inspection_notification<'a>(
+    summary: &'a InspectionSummary<'a>,
+) -> InspectionSummaryNotification<'a> {
+    let report = summary.report;
+    InspectionSummaryNotification {
+        version: 1,
+        source: "nodelite",
+        event: "inspection_summary",
+        occurred_at: summary.occurred_at,
+        local_date: summary.local_date,
+        lookback_hours: summary.lookback_hours,
+        totals: InspectionTotalsNotification {
+            total_nodes: report.total_nodes,
+            offline_nodes: report.offline_nodes,
+            latency_nodes: report.latency_nodes,
+            cpu_hot_nodes: report.cpu_hot_nodes,
+            memory_hot_nodes: report.memory_hot_nodes,
+        },
+        highlights: report
+            .highlights
+            .iter()
+            .map(|highlight| InspectionHighlightNotification {
+                node: AlertNodeNotification {
+                    id: &highlight.node_id,
+                    label: &highlight.node_label,
+                },
+                reasons: &highlight.reasons,
+            })
+            .collect(),
     }
 }
 
@@ -332,13 +434,15 @@ mod tests {
     use chrono::Utc;
     use nodelite_proto::{
         AlertChannel, AlertComparator, AlertMetric, AlertRuleConfig, AlertScopeMode, AlertSeverity,
-        AlertWebhookConfig, AlertingConfig,
+        AlertWebhookConfig, AlertingConfig, InspectionConfig,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::{deliver_alert_event, webhook_endpoint_label};
-    use crate::alerts::{AlertEvent, AlertEventKind, AlertMetricReading};
+    use super::{
+        InspectionSummary, deliver_alert_event, deliver_inspection_summary, webhook_endpoint_label,
+    };
+    use crate::alerts::{AlertEvent, AlertEventKind, AlertMetricReading, InspectionReport};
 
     #[tokio::test]
     async fn deliver_alert_event_posts_signed_webhook_payload() {
@@ -378,6 +482,62 @@ mod tests {
         assert!(request.contains("\"event\":\"triggered\""));
         assert!(request.contains("\"id\":\"cpu-hot\""));
         assert!(request.contains("\"value\":91"));
+    }
+
+    #[tokio::test]
+    async fn deliver_inspection_summary_posts_webhook_payload() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should expose addr");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("request should arrive");
+            let request = read_http_request(&mut socket).await;
+            socket
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("response should write");
+            request
+        });
+        let config = AlertingConfig {
+            enabled: true,
+            webhook: AlertWebhookConfig {
+                enabled: true,
+                url: format!("http://{addr}/inspection"),
+                secret: None,
+                send_resolved: true,
+            },
+            inspection: InspectionConfig {
+                enabled: true,
+                delivery: vec![AlertChannel::Webhook],
+                ..InspectionConfig::default()
+            },
+            ..AlertingConfig::default()
+        };
+        let report = InspectionReport {
+            total_nodes: 3,
+            offline_nodes: 1,
+            latency_nodes: 1,
+            cpu_hot_nodes: 0,
+            memory_hot_nodes: 0,
+            highlights: Vec::new(),
+        };
+        let summary = InspectionSummary {
+            occurred_at: Utc::now(),
+            local_date: chrono::NaiveDate::from_ymd_opt(2026, 5, 27).expect("date should be valid"),
+            lookback_hours: 24,
+            report: &report,
+        };
+
+        deliver_inspection_summary(&config, &summary)
+            .await
+            .expect("webhook should send");
+        let request = server.await.expect("server task should join");
+
+        assert!(request.starts_with("POST /inspection HTTP/1.1"));
+        assert!(request.contains("\"event\":\"inspection_summary\""));
+        assert!(request.contains("\"local_date\":\"2026-05-27\""));
+        assert!(request.contains("\"offline_nodes\":1"));
     }
 
     #[test]

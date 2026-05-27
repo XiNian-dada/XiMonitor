@@ -5,9 +5,12 @@ mod evaluator;
 mod runtime;
 mod tracker;
 
-pub(crate) use delivery::{deliver_alert_event, smtp_endpoint_label, webhook_endpoint_label};
+pub(crate) use delivery::{
+    InspectionSummary, deliver_alert_event, deliver_inspection_summary, smtp_endpoint_label,
+    webhook_endpoint_label,
+};
 pub(crate) use evaluator::{
-    AlertMetricReading, EvaluatedRule, build_inspection_report, evaluate_rules,
+    AlertMetricReading, EvaluatedRule, InspectionReport, build_inspection_report, evaluate_rules,
 };
 pub(crate) use runtime::spawn_alert_runtime;
 pub(crate) use tracker::{AlertEvent, AlertEventKind, AlertStateTracker};
