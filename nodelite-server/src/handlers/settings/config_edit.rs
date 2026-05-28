@@ -382,6 +382,7 @@ password = "old-pass"
                 sender: "nodelite@example.com".to_string(),
                 recipients: vec!["ops@example.com".to_string()],
                 transport: AlertSmtpTransport::StartTls,
+                send_resolved: true,
             },
             webhook: AlertWebhookConfig {
                 enabled: true,
@@ -547,6 +548,7 @@ send_resolved = true
                 sender: "nodelite@example.com".to_string(),
                 recipients: vec!["ops@example.com".to_string()],
                 transport: AlertSmtpTransport::StartTls,
+                send_resolved: true,
             },
             webhook: AlertWebhookConfig {
                 enabled: true,

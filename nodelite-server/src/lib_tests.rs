@@ -1530,7 +1530,7 @@ fn small_json_write_requests() -> [(&'static str, Option<&'static str>, &'static
         (
             "/api/settings/alerts",
             Some(TEST_BASIC_AUTH_HEADER),
-            r#"{"current_password":"wrong","enabled":false,"smtp":{"enabled":false,"host":"","port":587,"username":"","password":null,"sender":"","recipients":[],"transport":"starttls"},"webhook":{"enabled":false,"url":"","secret":null,"send_resolved":true},"rules":[],"inspection":{"enabled":false,"local_time":"09:00","lookback_hours":24,"delivery":[],"offline_grace_minutes":10,"latency_warn_ms":250,"cpu_warn_percent":85,"memory_warn_percent":90}}"#,
+            r#"{"current_password":"wrong","enabled":false,"smtp":{"enabled":false,"host":"","port":587,"username":"","password":null,"sender":"","recipients":[],"transport":"starttls","send_resolved":true},"webhook":{"enabled":false,"url":"","secret":null,"send_resolved":true},"rules":[],"inspection":{"enabled":false,"local_time":"09:00","lookback_hours":24,"delivery":[],"offline_grace_minutes":10,"latency_warn_ms":250,"cpu_warn_percent":85,"memory_warn_percent":90}}"#,
         ),
         (
             "/api/settings/update/server",

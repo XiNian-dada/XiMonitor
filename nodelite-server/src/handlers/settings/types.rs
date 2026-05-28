@@ -135,6 +135,7 @@ pub(crate) struct AlertSmtpSettingsView {
     pub(crate) sender: String,
     pub(crate) recipients: Vec<String>,
     pub(crate) transport: AlertSmtpTransport,
+    pub(crate) send_resolved: bool,
     pub(crate) password_configured: bool,
 }
 
@@ -231,6 +232,7 @@ pub(crate) struct UpdateAlertSmtpSettingsRequest {
     pub(crate) sender: String,
     pub(crate) recipients: Vec<String>,
     pub(crate) transport: AlertSmtpTransport,
+    pub(crate) send_resolved: bool,
 }
 
 #[derive(Debug, Deserialize)]

@@ -520,6 +520,7 @@ mod tests {
             sender: "ops@example.com".to_string(),
             recipients: vec!["oncall@example.com".to_string()],
             transport: AlertSmtpTransport::Plain,
+            send_resolved: true,
         }
     }
 

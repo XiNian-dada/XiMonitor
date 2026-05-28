@@ -172,6 +172,8 @@ struct RawAlertSmtpSection {
     recipients: Vec<String>,
     #[serde(default = "default_alert_smtp_transport")]
     transport: AlertSmtpTransport,
+    #[serde(default = "default_alert_send_resolved")]
+    send_resolved: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -290,6 +292,7 @@ impl Default for RawAlertSmtpSection {
             sender: String::new(),
             recipients: Vec::new(),
             transport: default_alert_smtp_transport(),
+            send_resolved: default_alert_send_resolved(),
         }
     }
 }
@@ -696,6 +699,7 @@ impl RawServerConfigFile {
             sender,
             recipients,
             transport: self.alerts.smtp.transport.clone(),
+            send_resolved: self.alerts.smtp.send_resolved,
         })
     }
 

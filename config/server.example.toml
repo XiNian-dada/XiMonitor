@@ -80,6 +80,7 @@ username = ""
 sender = ""
 recipients = []
 transport = "start_tls"
+send_resolved = true
 
 [alerts.webhook]
 # WebHook 渠道开关。建议配合独立机器人入口或告警平台使用。

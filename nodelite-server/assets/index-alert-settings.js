@@ -25,6 +25,7 @@ export function createAlertSettingsPanel(deps) {
         sender: "",
         recipients: [],
         transport: "start_tls",
+        send_resolved: true,
         password_configured: false,
       },
       webhook: {
@@ -154,6 +155,7 @@ export function createAlertSettingsPanel(deps) {
           [t("alerts.smtp.host"), config.host || t("common.not_available")],
           [t("alerts.smtp.sender"), config.sender || t("common.not_available")],
           [t("alerts.smtp.recipients"), config.recipients.length ? config.recipients.join(", ") : t("common.not_available")],
+          [t("alerts.smtp.send_resolved"), statusText(config.send_resolved)],
         ])}
         <details class="settings-details">
           <summary>${escapeHtml(t("alerts.details"))}</summary>
@@ -170,6 +172,7 @@ export function createAlertSettingsPanel(deps) {
             <label>${escapeHtml(t("alerts.smtp.username"))}<input class="settings-input" name="username" value="${escapeHtml(config.username)}"></label>
             <label>${escapeHtml(t("alerts.smtp.password"))}<input class="settings-input" type="password" name="password" placeholder="${config.password_configured ? escapeHtml(t("alerts.secret.keep")) : ""}"></label>
             <label class="settings-checkbox"><input type="checkbox" name="clear_password"><span>${escapeHtml(t("alerts.secret.clear"))}</span></label>
+            <label class="settings-checkbox"><input type="checkbox" name="send_resolved" ${config.send_resolved ? "checked" : ""}><span>${escapeHtml(t("alerts.smtp.send_resolved"))}</span></label>
           </div>
         </details>
       </form>
@@ -528,6 +531,7 @@ export function createAlertSettingsPanel(deps) {
       sender: valueOf(smtpForm, "sender").trim(),
       recipients: csvToArray(valueOf(smtpForm, "recipients")),
       transport: valueOf(smtpForm, "transport") || "start_tls",
+      send_resolved: isChecked(smtpForm, "send_resolved"),
       password: valueOf(smtpForm, "password"),
       clear_password: isChecked(smtpForm, "clear_password"),
     };
@@ -608,6 +612,7 @@ export function createAlertSettingsPanel(deps) {
           sender: alertsDraft.smtp.sender,
           recipients: alertsDraft.smtp.recipients,
           transport: alertsDraft.smtp.transport,
+          send_resolved: alertsDraft.smtp.send_resolved,
         },
         webhook: {
           enabled: alertsDraft.webhook.enabled,

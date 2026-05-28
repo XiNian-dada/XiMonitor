@@ -101,6 +101,7 @@ fn merge_alerting_request(
             sender: request.smtp.sender,
             recipients: request.smtp.recipients,
             transport: request.smtp.transport,
+            send_resolved: request.smtp.send_resolved,
         },
         webhook: nodelite_proto::AlertWebhookConfig {
             enabled: request.webhook.enabled,
@@ -160,6 +161,7 @@ fn alert_settings_view(config: &AlertingConfig) -> AlertSettingsView {
             sender: config.smtp.sender.clone(),
             recipients: config.smtp.recipients.clone(),
             transport: config.smtp.transport.clone(),
+            send_resolved: config.smtp.send_resolved,
             password_configured: config.smtp.password.is_some(),
         },
         webhook: AlertWebhookSettingsView {
@@ -291,6 +293,7 @@ mod tests {
                 sender: "ops@example.com".to_string(),
                 recipients: vec!["ops@example.com".to_string()],
                 transport: AlertSmtpTransport::StartTls,
+                send_resolved: true,
             },
             webhook: AlertWebhookConfig {
                 enabled: true,
@@ -315,6 +318,7 @@ mod tests {
                 sender: "ops@example.com".to_string(),
                 recipients: vec!["ops@example.com".to_string()],
                 transport: AlertSmtpTransport::StartTls,
+                send_resolved: true,
             },
             webhook: super::super::types::UpdateAlertWebhookSettingsRequest {
                 enabled: true,

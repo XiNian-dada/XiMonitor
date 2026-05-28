@@ -447,6 +447,7 @@ username = ""
 sender = ""
 recipients = []
 transport = "start_tls"
+send_resolved = true
 
 [alerts.webhook]
 enabled = false

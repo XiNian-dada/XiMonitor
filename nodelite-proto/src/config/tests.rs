@@ -290,6 +290,7 @@ fn parses_server_config_with_alerting() {
         sender = "nodelite@example.com"
         recipients = ["ops@example.com", "sre@example.com"]
         transport = "tls"
+        send_resolved = false
 
         [alerts.webhook]
         enabled = true
@@ -328,6 +329,7 @@ fn parses_server_config_with_alerting() {
     assert!(config.alerting.enabled);
     assert!(config.alerting.smtp.enabled);
     assert_eq!(config.alerting.smtp.transport, AlertSmtpTransport::Tls);
+    assert!(!config.alerting.smtp.send_resolved);
     assert_eq!(
         config.alerting.smtp.recipients,
         vec!["ops@example.com", "sre@example.com"]

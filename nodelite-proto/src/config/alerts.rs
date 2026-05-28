@@ -66,6 +66,7 @@ pub struct AlertSmtpConfig {
     pub sender: String,
     pub recipients: Vec<String>,
     pub transport: AlertSmtpTransport,
+    pub send_resolved: bool,
 }
 
 impl Default for AlertSmtpConfig {
@@ -79,6 +80,7 @@ impl Default for AlertSmtpConfig {
             sender: String::new(),
             recipients: Vec::new(),
             transport: AlertSmtpTransport::StartTls,
+            send_resolved: true,
         }
     }
 }

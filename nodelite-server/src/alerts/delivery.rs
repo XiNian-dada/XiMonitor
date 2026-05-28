@@ -266,6 +266,7 @@ fn should_send_smtp(config: &AlertingConfig, event: &AlertEvent) -> bool {
     config.smtp.enabled
         && event.rule.delivery.contains(&AlertChannel::Smtp)
         && should_send_resolved(event)
+        && (!is_resolved(event) || config.smtp.send_resolved)
 }
 
 fn should_send_resolved(event: &AlertEvent) -> bool {
@@ -668,6 +669,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deliver_alert_event_skips_resolved_smtp_when_channel_disables_it() {
+        let mut event = sample_event();
+        event.kind = AlertEventKind::Resolved;
+        event.rule.delivery = vec![AlertChannel::Smtp];
+        let config = AlertingConfig {
+            enabled: true,
+            smtp: AlertSmtpConfig {
+                send_resolved: false,
+                ..invalid_smtp_config()
+            },
+            ..AlertingConfig::default()
+        };
+
+        deliver_alert_event(&config, &event)
+            .await
+            .expect("resolved smtp delivery should be skipped when channel disables it");
+    }
+
+    #[tokio::test]
     async fn deliver_inspection_summary_reports_webhook_and_smtp_failures() {
         let report = InspectionReport {
             total_nodes: 3,
@@ -798,6 +818,7 @@ mod tests {
             sender: "ops@example.com\r\n".to_string(),
             recipients: vec!["ops@example.com".to_string()],
             transport: AlertSmtpTransport::StartTls,
+            send_resolved: true,
         }
     }
 
