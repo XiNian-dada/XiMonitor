@@ -42,41 +42,33 @@ pub(crate) struct WriterMetrics {
 
 pub(crate) fn render_writer_metrics(metrics: WriterMetrics) -> String {
     let mut emitter = MetricEmitter::default();
-    emitter.counter(
-        "nodelite_history_dropped_writes_total",
-        "Number of history samples dropped because the writer queue was full.",
-        &[],
-        metrics.history_dropped_writes,
+    render_bounded_queue_metrics(
+        &mut emitter,
+        BoundedQueueMetrics {
+            dropped_metric: "nodelite_history_dropped_writes_total",
+            dropped_help: "Number of history samples dropped because the writer queue was full.",
+            depth_metric: "nodelite_history_queue_depth",
+            depth_help: "Number of history samples waiting in the writer queue.",
+            capacity_metric: "nodelite_history_queue_capacity",
+            capacity_help: "Maximum number of history samples accepted by the writer queue.",
+            dropped_total: metrics.history_dropped_writes,
+            depth: metrics.history_queue_depth,
+            capacity: metrics.history_queue_capacity,
+        },
     );
-    emitter.gauge(
-        "nodelite_history_queue_depth",
-        "Number of history samples waiting in the writer queue.",
-        &[],
-        metrics.history_queue_depth,
-    );
-    emitter.gauge(
-        "nodelite_history_queue_capacity",
-        "Maximum number of history samples accepted by the writer queue.",
-        &[],
-        metrics.history_queue_capacity,
-    );
-    emitter.counter(
-        "nodelite_audit_dropped_writes_total",
-        "Number of audit events dropped because the writer queue was full.",
-        &[],
-        metrics.audit_dropped_writes,
-    );
-    emitter.gauge(
-        "nodelite_audit_queue_depth",
-        "Number of audit commands waiting in the writer queue.",
-        &[],
-        metrics.audit_queue_depth,
-    );
-    emitter.gauge(
-        "nodelite_audit_queue_capacity",
-        "Maximum number of audit commands accepted by the writer queue.",
-        &[],
-        metrics.audit_queue_capacity,
+    render_bounded_queue_metrics(
+        &mut emitter,
+        BoundedQueueMetrics {
+            dropped_metric: "nodelite_audit_dropped_writes_total",
+            dropped_help: "Number of audit events dropped because the writer queue was full.",
+            depth_metric: "nodelite_audit_queue_depth",
+            depth_help: "Number of audit commands waiting in the writer queue.",
+            capacity_metric: "nodelite_audit_queue_capacity",
+            capacity_help: "Maximum number of audit commands accepted by the writer queue.",
+            dropped_total: metrics.audit_dropped_writes,
+            depth: metrics.audit_queue_depth,
+            capacity: metrics.audit_queue_capacity,
+        },
     );
     emitter.counter(
         "nodelite_audit_write_failures_total",
@@ -95,24 +87,25 @@ pub(crate) fn render_writer_metrics(metrics: WriterMetrics) -> String {
 
 pub(crate) fn render_agent_log_metrics(stats: AgentLogStats) -> String {
     let mut emitter = MetricEmitter::default();
-    emitter.gauge(
-        "nodelite_agent_log_nodes",
-        "Number of nodes currently holding in-memory agent logs.",
-        &[],
-        stats.nodes,
-    );
-    emitter.gauge(
-        "nodelite_agent_log_entries",
-        "Number of in-memory agent log entries currently retained.",
-        &[],
-        stats.entries,
-    );
-    emitter.gauge(
-        "nodelite_agent_log_estimated_bytes",
-        "Estimated bytes currently retained by the in-memory agent log store.",
-        &[],
-        stats.estimated_bytes,
-    );
+    for (metric, help, value) in [
+        (
+            "nodelite_agent_log_nodes",
+            "Number of nodes currently holding in-memory agent logs.",
+            stats.nodes,
+        ),
+        (
+            "nodelite_agent_log_entries",
+            "Number of in-memory agent log entries currently retained.",
+            stats.entries,
+        ),
+        (
+            "nodelite_agent_log_estimated_bytes",
+            "Estimated bytes currently retained by the in-memory agent log store.",
+            stats.estimated_bytes,
+        ),
+    ] {
+        emitter.gauge(metric, help, &[], value);
+    }
     emitter.finish()
 }
 
@@ -151,16 +144,16 @@ pub(crate) fn render_api_cache_metrics(metrics: ApiCacheMetrics) -> String {
             metrics.metrics_body_bytes,
         ),
     ] {
-        emitter.counter(
-            "nodelite_api_cache_hits_total",
-            "Number of cached API response body hits.",
-            &[("kind", kind)],
+        render_cache_hit_metrics(
+            &mut emitter,
+            CacheHitMetrics {
+                hits_metric: "nodelite_api_cache_hits_total",
+                hits_help: "Number of cached API response body hits.",
+                misses_metric: "nodelite_api_cache_misses_total",
+                misses_help: "Number of cached API response body misses.",
+            },
+            kind,
             hits,
-        );
-        emitter.counter(
-            "nodelite_api_cache_misses_total",
-            "Number of cached API response body misses.",
-            &[("kind", kind)],
             misses,
         );
         emitter.gauge(
@@ -169,16 +162,16 @@ pub(crate) fn render_api_cache_metrics(metrics: ApiCacheMetrics) -> String {
             &[("kind", kind)],
             body_bytes,
         );
-        emitter.counter(
-            "nodelite_view_cache_hits_total",
-            "Number of cached HTTP view response body hits.",
-            &[("kind", kind)],
+        render_cache_hit_metrics(
+            &mut emitter,
+            CacheHitMetrics {
+                hits_metric: "nodelite_view_cache_hits_total",
+                hits_help: "Number of cached HTTP view response body hits.",
+                misses_metric: "nodelite_view_cache_misses_total",
+                misses_help: "Number of cached HTTP view response body misses.",
+            },
+            kind,
             hits,
-        );
-        emitter.counter(
-            "nodelite_view_cache_misses_total",
-            "Number of cached HTTP view response body misses.",
-            &[("kind", kind)],
             misses,
         );
     }
@@ -189,6 +182,55 @@ pub(crate) fn render_api_cache_metrics(metrics: ApiCacheMetrics) -> String {
         metrics.metrics_body_bytes,
     );
     emitter.finish()
+}
+
+#[derive(Clone, Copy)]
+struct BoundedQueueMetrics {
+    dropped_metric: &'static str,
+    dropped_help: &'static str,
+    depth_metric: &'static str,
+    depth_help: &'static str,
+    capacity_metric: &'static str,
+    capacity_help: &'static str,
+    dropped_total: u64,
+    depth: u64,
+    capacity: u64,
+}
+
+#[derive(Clone, Copy)]
+struct CacheHitMetrics {
+    hits_metric: &'static str,
+    hits_help: &'static str,
+    misses_metric: &'static str,
+    misses_help: &'static str,
+}
+
+fn render_bounded_queue_metrics(emitter: &mut MetricEmitter, metrics: BoundedQueueMetrics) {
+    emitter.counter(
+        metrics.dropped_metric,
+        metrics.dropped_help,
+        &[],
+        metrics.dropped_total,
+    );
+    emitter.gauge(metrics.depth_metric, metrics.depth_help, &[], metrics.depth);
+    emitter.gauge(
+        metrics.capacity_metric,
+        metrics.capacity_help,
+        &[],
+        metrics.capacity,
+    );
+}
+
+fn render_cache_hit_metrics(
+    emitter: &mut MetricEmitter,
+    metrics: CacheHitMetrics,
+    kind: &str,
+    hits: u64,
+    misses: u64,
+) {
+    let labels = [("kind", kind)];
+    emitter.counter(metrics.hits_metric, metrics.hits_help, &labels, hits);
+    emitter.counter(metrics.misses_metric, metrics.misses_help, &labels, misses);
 }
 
 #[derive(Clone, Copy)]

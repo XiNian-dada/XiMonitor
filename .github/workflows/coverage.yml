@@ -29,7 +29,7 @@ jobs:
             . -> target
 
       - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
+        uses: taiki-e/install-action@cargo-tarpaulin
 
       - name: Run coverage
         run: cargo tarpaulin --config tarpaulin.toml

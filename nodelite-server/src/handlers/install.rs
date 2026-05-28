@@ -6,9 +6,10 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 use tracing::error;
 
+use super::record_audit_event;
 use crate::AppState;
 use crate::admission::resolve_client_ip;
-use crate::audit::{AuditEventType, NewAuditEvent};
+use crate::audit::AuditEventType;
 use crate::registry::render_agent_config;
 
 const INSTALL_AGENT_SCRIPT: &str = include_str!("../../../scripts/install-agent.sh");
@@ -132,18 +133,19 @@ async fn record_install_block(
     audit_user_agent: &Option<String>,
     retry_after_secs: u64,
 ) {
-    let mut event = NewAuditEvent::now(
+    record_audit_event(
+        state,
         AuditEventType::RateLimitExceeded,
         client_ip.to_string(),
         false,
-    );
-    event.user_agent = audit_user_agent.clone();
-    event.details = json!({
-        "endpoint": "/install/bootstrap",
-        "retry_after_secs": retry_after_secs,
-        "reason": "install_auth_block",
-    });
-    state.audit_log.record_best_effort(event).await;
+        audit_user_agent.clone(),
+        json!({
+            "endpoint": "/install/bootstrap",
+            "retry_after_secs": retry_after_secs,
+            "reason": "install_auth_block",
+        }),
+    )
+    .await;
 }
 
 async fn record_install_token_failure(
@@ -153,13 +155,18 @@ async fn record_install_token_failure(
     reason: &'static str,
 ) {
     state.install_admission.record_auth_failure(client_ip);
-    let mut event = NewAuditEvent::now(AuditEventType::TokenInvalid, client_ip.to_string(), false);
-    event.user_agent = audit_user_agent.clone();
-    event.details = json!({
-        "endpoint": "/install/bootstrap",
-        "reason": reason,
-    });
-    state.audit_log.record_best_effort(event).await;
+    record_audit_event(
+        state,
+        AuditEventType::TokenInvalid,
+        client_ip.to_string(),
+        false,
+        audit_user_agent.clone(),
+        json!({
+            "endpoint": "/install/bootstrap",
+            "reason": reason,
+        }),
+    )
+    .await;
 }
 
 fn request_user_agent(request: &Request) -> Option<String> {

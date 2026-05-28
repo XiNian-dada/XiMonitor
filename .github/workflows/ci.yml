@@ -62,8 +62,30 @@ jobs:
         run: cargo audit --deny warnings
 
       - name: Check dependency policy
-        # 目前先聚焦 advisories,后续如需 license/source/bans 规则可在 deny.toml 继续扩展。
-        run: cargo deny check advisories
+        run: cargo deny check advisories licenses bans
+
+  msrv:
+    name: MSRV Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust MSRV
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-msrv
+          workspaces: |
+            . -> target
+
+      - name: Run tests with MSRV
+        run: cargo test --workspace --locked
 
   web-lint-and-test:
     # 前端 Stage 0 守门:lint / typecheck / 单测 / 构建,以及 CSP 内联脚本守卫。
@@ -118,7 +140,7 @@ jobs:
   cross-build:
     # 跨平台构建:确保发布前 musl 目标都能编译通过。
     name: Cross Build ${{ matrix.target }}
-    needs: lint-and-test
+    needs: [lint-and-test, msrv]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -163,7 +185,7 @@ jobs:
   agent-macos-build:
     # 先只验证 Agent 的官方 macOS 构建目标,避免把 server/安装链路一起扩大。
     name: Agent macOS Build ${{ matrix.target }}
-    needs: lint-and-test
+    needs: [lint-and-test, msrv]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

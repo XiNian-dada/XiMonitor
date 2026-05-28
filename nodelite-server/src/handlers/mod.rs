@@ -14,6 +14,9 @@ pub(crate) mod metrics_exporter;
 mod pages;
 mod settings;
 
+use crate::AppState;
+use crate::audit::{AuditEventType, NewAuditEvent};
+
 pub(crate) use api::{
     audit_log, bootstrap, metrics, node_history, node_logs, node_status, nodes, overview,
 };
@@ -30,6 +33,20 @@ pub(crate) use settings::{
     refresh_node_token, server_update_log, settings, start_server_update, start_two_factor_setup,
     update_alert_settings,
 };
+
+async fn record_audit_event(
+    state: &AppState,
+    event_type: AuditEventType,
+    client_ip: String,
+    success: bool,
+    user_agent: Option<String>,
+    details: serde_json::Value,
+) {
+    let mut event = NewAuditEvent::now(event_type, client_ip, success);
+    event.user_agent = user_agent;
+    event.details = details;
+    state.audit_log.record_best_effort(event).await;
+}
 
 #[cfg(test)]
 pub(crate) fn is_well_formed_install_token(token: &str) -> bool {

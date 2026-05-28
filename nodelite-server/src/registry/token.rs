@@ -43,7 +43,8 @@ pub(super) fn mint_install_session(
 pub(super) fn token_is_unexpired(entry: &RegisteredNode, now: DateTime<Utc>) -> bool {
     entry
         .token_expires_at
-        .is_none_or(|expires_at| now < expires_at)
+        .map(|expires_at| now < expires_at)
+        .unwrap_or(true)
 }
 
 pub(super) fn authorized_node_from_entry(
