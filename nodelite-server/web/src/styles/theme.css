@@ -1,0 +1,82 @@
+/*
+ * Theme tokens — mirrored from nodelite-server/assets/index.html:47-94.
+ * The :root block is the default (dark); :root[data-theme="light"] overrides.
+ */
+
+:root {
+  color-scheme: dark;
+  --brand-logo: url('/assets/brand-logo-dark.webp');
+  --bg-app: #060912;
+  --bg-sidebar: #0a0f1a;
+  --bg-card: #0e1422;
+  --bg-card-soft: #121a2c;
+  --bg-elevated: #18223a;
+  --border-soft: rgba(148, 163, 184, 0.08);
+  --border-strong: rgba(148, 163, 184, 0.16);
+  --text-primary: #e6edf3;
+  --text-secondary: #b6bfcc;
+  --text-muted: #6b7785;
+  --text-dim: #4b5563;
+  --accent-blue: #3b82f6;
+  --accent-blue-soft: rgba(59, 130, 246, 0.16);
+  --accent-green: #22c55e;
+  --accent-green-soft: rgba(34, 197, 94, 0.18);
+  --accent-yellow: #eab308;
+  --accent-yellow-soft: rgba(234, 179, 8, 0.18);
+  --accent-red: #ef4444;
+  --accent-red-soft: rgba(239, 68, 68, 0.18);
+  --accent-purple: #a855f7;
+  --map-land-dot: rgba(148, 163, 184, 0.48);
+  --map-land-stroke: rgba(15, 23, 42, 0.34);
+  font-family: 'Inter', 'PingFang SC', 'Helvetica Neue', 'Segoe UI', system-ui, -apple-system, sans-serif;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --brand-logo: url('/assets/brand-logo-light.webp');
+  --bg-app: #f4f6fb;
+  --bg-sidebar: #ffffff;
+  --bg-card: #ffffff;
+  --bg-card-soft: #f6f8fc;
+  --bg-elevated: #eef2f8;
+  --border-soft: rgba(15, 23, 42, 0.06);
+  --border-strong: rgba(15, 23, 42, 0.12);
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
+  --text-dim: #94a3b8;
+  --accent-blue-soft: rgba(59, 130, 246, 0.12);
+  --accent-green-soft: rgba(34, 197, 94, 0.16);
+  --accent-yellow-soft: rgba(234, 179, 8, 0.18);
+  --accent-red-soft: rgba(239, 68, 68, 0.16);
+  --map-land-dot: rgba(71, 85, 105, 0.56);
+  --map-land-stroke: rgba(15, 23, 42, 0.22);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--text-primary);
+  background: var(--bg-app);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
