@@ -6,7 +6,7 @@ See [docs/frontend-vue-refactor-plan.md](../../docs/frontend-vue-refactor-plan.m
 ## Prerequisites
 
 - Node.js **20+**
-- pnpm **9+** (`brew install pnpm` or `npm install -g pnpm`)
+- pnpm **10.11+** (`corepack enable && corepack prepare pnpm@10.11.0 --activate`, or `brew install pnpm`)
 
 ## Scripts
 
