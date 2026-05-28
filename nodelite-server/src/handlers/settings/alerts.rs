@@ -11,6 +11,7 @@ use nodelite_proto::{AlertingConfig, NodeStatus};
 
 use super::config_edit::persist_alerting_change;
 use super::helpers::settings_json_error;
+use super::security::settings_confirmation_error_for_sensitive_action;
 use super::types::{
     AlertPreview, AlertRuleView, AlertSettingsResponse, AlertSettingsView, AlertSmtpSettingsView,
     AlertWebhookSettingsView, InspectionHighlight, InspectionPreview, InspectionSettingsView,
@@ -25,6 +26,22 @@ pub(crate) async fn update_alert_settings(
     State(state): State<AppState>,
     Json(request): Json<UpdateAlertSettingsRequest>,
 ) -> Response {
+    let current_auth = {
+        let auth = state.readonly_auth.read().await;
+        auth.config.clone()
+    };
+    let Some(current_auth) = current_auth else {
+        return settings_json_error(StatusCode::CONFLICT, "readonly auth is not enabled");
+    };
+    if let Some(response) = settings_confirmation_error_for_sensitive_action(
+        &state,
+        &current_auth,
+        request.current_password.as_deref(),
+        request.code.as_deref(),
+    ) {
+        return response;
+    }
+
     let next_config = {
         let current = state.alerting.read().await;
         merge_alerting_request(&current, request)
@@ -285,6 +302,8 @@ mod tests {
             inspection: InspectionConfig::default(),
         };
         let request = super::UpdateAlertSettingsRequest {
+            current_password: Some("readonly-secret".to_string()),
+            code: None,
             enabled: true,
             smtp: super::super::types::UpdateAlertSmtpSettingsRequest {
                 enabled: true,

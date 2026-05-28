@@ -210,6 +210,8 @@ pub(crate) struct InspectionHighlight {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct UpdateAlertSettingsRequest {
+    pub(crate) current_password: Option<String>,
+    pub(crate) code: Option<String>,
     pub(crate) enabled: bool,
     pub(crate) smtp: UpdateAlertSmtpSettingsRequest,
     pub(crate) webhook: UpdateAlertWebhookSettingsRequest,

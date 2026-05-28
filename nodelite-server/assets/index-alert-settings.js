@@ -110,6 +110,8 @@ export function createAlertSettingsPanel(deps) {
             <input type="checkbox" id="alerts-enabled" ${config.enabled ? "checked" : ""}>
             <span>${escapeHtml(t("alerts.overview.enabled"))}</span>
           </label>
+          <label>${escapeHtml(t("settings.password.current"))}<input class="settings-input" type="password" id="alerts-current-password" autocomplete="current-password"></label>
+          <label>${escapeHtml(t("settings.security.verification_code"))}<input class="settings-input" type="text" id="alerts-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"></label>
           <button type="button" class="settings-button primary" id="alerts-save">${escapeHtml(t("alerts.save"))}</button>
         </div>
         ${alertMessageMarkup()}
@@ -593,6 +595,8 @@ export function createAlertSettingsPanel(deps) {
     }
     try {
       latestAlerts = await postSettingsJson("/api/settings/alerts", {
+        current_password: document.getElementById("alerts-current-password")?.value || null,
+        code: document.getElementById("alerts-code")?.value || null,
         enabled: alertsDraft.enabled,
         smtp: {
           enabled: alertsDraft.smtp.enabled,
@@ -631,6 +635,10 @@ export function createAlertSettingsPanel(deps) {
         inspection: alertsDraft.inspection,
       });
       alertsDraft = normalizeAlertConfig(latestAlerts.config || emptyAlertsConfig());
+      const currentPassword = document.getElementById("alerts-current-password");
+      const code = document.getElementById("alerts-code");
+      if (currentPassword) currentPassword.value = "";
+      if (code) code.value = "";
       alertMessage = { type: "ok", text: t("alerts.saved") };
       renderAlertSettings();
     } catch (error) {

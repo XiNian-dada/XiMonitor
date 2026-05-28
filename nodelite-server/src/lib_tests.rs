@@ -1499,7 +1499,7 @@ fn json_request(
     request
 }
 
-fn json_write_routes() -> [(&'static str, Option<&'static str>); 6] {
+fn json_write_routes() -> [(&'static str, Option<&'static str>); 7] {
     [
         ("/api/verify-2fa", None),
         (
@@ -1507,13 +1507,14 @@ fn json_write_routes() -> [(&'static str, Option<&'static str>); 6] {
             Some(TEST_BASIC_AUTH_HEADER),
         ),
         ("/api/settings/password", Some(TEST_BASIC_AUTH_HEADER)),
+        ("/api/settings/alerts", Some(TEST_BASIC_AUTH_HEADER)),
         ("/api/settings/update/server", Some(TEST_BASIC_AUTH_HEADER)),
         ("/api/settings/2fa/enable", Some(TEST_BASIC_AUTH_HEADER)),
         ("/api/settings/2fa/disable", Some(TEST_BASIC_AUTH_HEADER)),
     ]
 }
 
-fn small_json_write_requests() -> [(&'static str, Option<&'static str>, &'static str); 6] {
+fn small_json_write_requests() -> [(&'static str, Option<&'static str>, &'static str); 7] {
     [
         ("/api/verify-2fa", None, r#"{"code":"000000"}"#),
         (
@@ -1525,6 +1526,11 @@ fn small_json_write_requests() -> [(&'static str, Option<&'static str>, &'static
             "/api/settings/password",
             Some(TEST_BASIC_AUTH_HEADER),
             r#"{"current_password":"wrong","new_password":"new-secret-password"}"#,
+        ),
+        (
+            "/api/settings/alerts",
+            Some(TEST_BASIC_AUTH_HEADER),
+            r#"{"current_password":"wrong","enabled":false,"smtp":{"enabled":false,"host":"","port":587,"username":"","password":null,"sender":"","recipients":[],"transport":"starttls"},"webhook":{"enabled":false,"url":"","secret":null,"send_resolved":true},"rules":[],"inspection":{"enabled":false,"local_time":"09:00","lookback_hours":24,"delivery":[],"offline_grace_minutes":10,"latency_warn_ms":250,"cpu_warn_percent":85,"memory_warn_percent":90}}"#,
         ),
         (
             "/api/settings/update/server",
