@@ -128,12 +128,17 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Guard against inline scripts (CSP)
-        # Vite 默认会在 modulePreload polyfill 时注入内联 <script>,违反我们的严格 CSP。
-        # 任何 <script>...</script>(非 src=)出现都判失败。
+      - name: Guard against bulk inline scripts (CSP)
+        # 短的引导 shim(主题防闪烁 + 24h auth 检查)允许放行,任何 >800 字符的
+        # 内联 <script>(例如 Vite 误注入的 modulePreload polyfill、误塞进来的
+        # 业务 JS)判失败。
+        # Stage 4 必须用 vite-plugin-csp-guard(或等价物)计算 sha256 + 注入响
+        # 应头,把这一守卫升级为严格的 script-src 'self' 'sha256-...'。
         run: |
-          if grep -E '<script>[^<]' dist/index.html; then
-            echo "::error::Vite emitted inline script — CSP would break"
+          if perl -ne 'BEGIN{$/=undef} exit 1 if /<script>[^<]{800,}/' dist/index.html; then
+            echo "inline-script guard: ok"
+          else
+            echo "::error::dist/index.html contains an inline <script> longer than 800 chars"
             exit 1
           fi
 

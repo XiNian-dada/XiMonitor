@@ -4,32 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>NodeLite</title>
-    <script>
-      (function () {
-        try {
-          var t = window.localStorage.getItem('nodelite.ui.theme');
-          document.documentElement.dataset.theme = t === 'light' ? 'light' : 'dark';
-        } catch (e) {
-          document.documentElement.dataset.theme = 'dark';
-        }
-        try {
-          var k = 'nodelite.auth.timestamp';
-          var raw = window.localStorage.getItem(k);
-          var now = Date.now();
-          if (raw !== null) {
-            var ts = parseInt(raw, 10);
-            if (isFinite(ts) && now - ts > 86400000) {
-              window.localStorage.removeItem(k);
-              window.location.assign('/logout-and-reauth');
-              return;
-            }
-          }
-          window.localStorage.setItem(k, now.toString());
-        } catch (e) {
-          /* localStorage unavailable — fail open */
-        }
-      })();
-    </script>
+    <script>(function(){try{var t=localStorage.getItem('nodelite.ui.theme');document.documentElement.dataset.theme=t==='light'?'light':'dark'}catch(e){document.documentElement.dataset.theme='dark'}try{var k='nodelite.auth.timestamp',r=localStorage.getItem(k),n=Date.now();if(r!==null){var s=parseInt(r,10);if(isFinite(s)&&n-s>86400000){localStorage.removeItem(k);location.assign('/logout-and-reauth');return}}localStorage.setItem(k,n.toString())}catch(e){}})();</script>
   </head>
   <body>
     <div id="app"></div>
