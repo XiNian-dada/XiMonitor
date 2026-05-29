@@ -44,4 +44,51 @@ describe('apiClient.nodeHistory', () => {
     const url = fetchMock.mock.calls[0]![0] as string;
     expect(url).toBe('/api/nodes/n/history?max_points=60');
   });
+
+  it('supports a start/end range query', async () => {
+    await apiClient.nodeHistory('n', { start: 1000, end: 2000, maxPoints: 720 });
+    const url = fetchMock.mock.calls[0]![0] as string;
+    expect(url).toBe('/api/nodes/n/history?max_points=720&start=1000&end=2000');
+  });
+});
+
+describe('apiClient.nodeStatus', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn().mockResolvedValue(jsonResponse({}));
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('fetches the full node status, encoding the id', async () => {
+    await apiClient.nodeStatus('a b');
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/nodes/a%20b');
+  });
+});
+
+describe('apiClient.nodeLogs', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn().mockResolvedValue(jsonResponse([]));
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('defaults to limit=200', async () => {
+    await apiClient.nodeLogs('n');
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/nodes/n/logs?limit=200');
+  });
+
+  it('honors a custom limit', async () => {
+    await apiClient.nodeLogs('n', 50);
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/nodes/n/logs?limit=50');
+  });
 });

@@ -67,4 +67,81 @@ export interface HistoryPoint {
 export interface HistoryQuery {
   windowHours?: number;
   maxPoints?: number;
+  /** Unix seconds; start + end must be supplied together for a range query. */
+  start?: number;
+  end?: number;
+}
+
+/** Full per-node identity — GET /api/nodes/{id}, nodelite-proto NodeIdentity */
+export interface NodeIdentity {
+  node_id: string;
+  node_label: string;
+  hostname: string;
+  os: string;
+  kernel_version: string | null;
+  cpu_model: string | null;
+  cpu_cores: number;
+  agent_version: string;
+  boot_time: string | null;
+  tags: string[];
+}
+
+export interface LoadAverage {
+  one: number;
+  five: number;
+  fifteen: number;
+}
+
+export interface MemoryUsage {
+  total_bytes: number;
+  used_bytes: number;
+  available_bytes: number;
+  swap_total_bytes: number;
+  swap_used_bytes: number;
+}
+
+export interface DiskUsage {
+  device: string;
+  mount_point: string;
+  fs_type: string;
+  total_bytes: number;
+  available_bytes: number;
+  used_bytes: number;
+  used_percent: number;
+}
+
+export interface NetworkCounters {
+  total_rx_bytes: number;
+  total_tx_bytes: number;
+  rx_bytes_per_sec: number | null;
+  tx_bytes_per_sec: number | null;
+}
+
+export interface NodeSnapshot {
+  collected_at: string;
+  cpu_usage_percent: number | null;
+  load: LoadAverage;
+  memory: MemoryUsage;
+  uptime_secs: number;
+  disks: DiskUsage[];
+  network: NetworkCounters;
+}
+
+/** GET /api/nodes/{id} — full nodelite-proto NodeStatus */
+export interface NodeStatus {
+  identity: NodeIdentity;
+  remote_ip: string | null;
+  snapshot: NodeSnapshot | null;
+  last_seen: string | null;
+  latency_ms: number | null;
+  online: boolean;
+}
+
+export type LogLevel = 'info' | 'warn' | 'error';
+
+/** GET /api/nodes/{id}/logs — nodelite-proto AgentLogEntry */
+export interface AgentLogEntry {
+  occurred_at: string;
+  level: LogLevel;
+  message: string;
 }
