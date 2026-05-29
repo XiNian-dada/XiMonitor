@@ -2,9 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
 import { createApp, defineComponent, h } from 'vue';
 import { createPinia, setActivePinia } from 'pinia';
+import { nextTick } from 'vue';
 import { setupI18n, getI18n, __resetI18nForTest } from '@/i18n';
 import { __resetWorldGeoJsonForTest } from '@/composables/useWorldGeoJson';
 import { useNodesStore } from '@/stores/nodes';
+import { useTheme } from '@/composables/useTheme';
 import { makeNode } from '@/api/__fixtures__/nodes';
 import NodeMap from './NodeMap.vue';
 
@@ -67,6 +69,7 @@ describe('NodeMap', () => {
     __resetI18nForTest();
     __resetWorldGeoJsonForTest();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it('renders the map card with canvas and legend', async () => {
@@ -110,5 +113,20 @@ describe('NodeMap', () => {
       }),
     ]);
     expect(wrapper.find('[data-test="map-dot"]').classes()).toContain('latency');
+  });
+
+  it('repaints the canvas when the theme changes', async () => {
+    // getContext is the stubbed entry point of paintWorldDotMap; a repaint
+    // calls it again. Mount paints once; toggling theme should repaint.
+    const getContext = HTMLCanvasElement.prototype.getContext as unknown as ReturnType<
+      typeof vi.fn
+    >;
+    await mountWithNodes([]);
+    const callsAfterMount = getContext.mock.calls.length;
+    expect(callsAfterMount).toBeGreaterThan(0);
+
+    useTheme().toggleTheme();
+    await nextTick();
+    expect(getContext.mock.calls.length).toBeGreaterThan(callsAfterMount);
   });
 });

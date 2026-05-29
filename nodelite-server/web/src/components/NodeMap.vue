@@ -2,11 +2,13 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { useNodesStore } from '@/stores/nodes';
 import { useWorldGeoJson } from '@/composables/useWorldGeoJson';
+import { useTheme } from '@/composables/useTheme';
 import { nodePosition, nodeStatusKey } from '@/lib/map/projection';
 import { drawFallbackMask, drawGeoJsonMask, paintWorldDotMap } from '@/lib/map/landMask';
 
 const nodesStore = useNodesStore();
 const { geojson, load } = useWorldGeoJson();
+const { theme } = useTheme();
 
 const canvas = ref<HTMLCanvasElement | null>(null);
 
@@ -47,8 +49,10 @@ onMounted(() => {
   void load();
 });
 
-// Re-render the land mask when the real GeoJSON resolves.
-watch(geojson, repaint);
+// Re-render the land mask when the real GeoJSON resolves, and again on
+// theme change — the land-dot colour comes from the --map-land-dot CSS var,
+// which is read at paint time (matches legacy's repaint-on-toggle).
+watch([geojson, theme], repaint);
 </script>
 
 <template>
