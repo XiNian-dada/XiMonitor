@@ -4,6 +4,7 @@ import { createApp, defineComponent, h } from 'vue';
 import { createPinia, setActivePinia } from 'pinia';
 import { setupI18n, getI18n, __resetI18nForTest } from '@/i18n';
 import { apiClient } from '@/api';
+import { useNodeHistoryStore } from '@/stores/nodeHistory';
 import { makeNode } from '@/api/__fixtures__/nodes';
 import NodeCard from './NodeCard.vue';
 
@@ -123,5 +124,36 @@ describe('NodeCard', () => {
     });
     await mountCard(node);
     expect(mockHistory).toHaveBeenCalledWith('abc', { windowHours: 3, maxPoints: 180 });
+  });
+
+  it('re-requests history when the snapshot changes (polling refresh)', async () => {
+    // Spy on the store action so the assertion is independent of the TTL
+    // clock — the point is the watch fires loadIfStale again, not whether
+    // the store decides to refetch.
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const store = useNodeHistoryStore();
+    const loadSpy = vi.spyOn(store, 'loadIfStale');
+
+    const node = makeNode({
+      identity: { node_id: 'n1', node_label: 'N', hostname: 'h', tags: [] },
+      snapshot: { cpu_usage_percent: 10, load: { one: 0.1 }, memory: { total_bytes: 1, used_bytes: 0 } },
+    });
+    const wrapper = mount(NodeCard, {
+      props: { node },
+      global: { plugins: [pinia, getI18n()], stubs: { RouterLink: RouterLinkStub } },
+    });
+    await flushPromises();
+    expect(loadSpy).toHaveBeenCalledTimes(1); // immediate
+
+    // A poll replaces the node object with a fresh snapshot reference.
+    await wrapper.setProps({
+      node: makeNode({
+        identity: { node_id: 'n1', node_label: 'N', hostname: 'h', tags: [] },
+        snapshot: { cpu_usage_percent: 55, load: { one: 0.9 }, memory: { total_bytes: 1, used_bytes: 0 } },
+      }),
+    });
+    await flushPromises();
+    expect(loadSpy).toHaveBeenCalledTimes(2);
   });
 });

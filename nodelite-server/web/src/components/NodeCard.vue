@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue';
+import { computed, watch } from 'vue';
 import type { NodeListItem } from '@/api';
 import { nodeFlag, nodeStatusKey } from '@/lib/map/projection';
 import { buildSparkline, nodeSparkPoints, sparklineColor } from '@/lib/chart/sparkline';
@@ -53,8 +53,12 @@ const sparkPoints = computed(() =>
 );
 const spark = computed(() => buildSparkline(sparkPoints.value));
 
-onMounted(() => {
-  void historyStore.loadIfStale(nodeId.value);
+// Re-request on every snapshot change (the 5s poll replaces node objects),
+// throttled to once a minute by the store's TTL. NodeCard is keyed by
+// node_id so the instance is reused across polls — onMounted alone would
+// fire only once and freeze the sparkline.
+watch(() => props.node.snapshot, () => void historyStore.loadIfStale(nodeId.value), {
+  immediate: true,
 });
 </script>
 
