@@ -147,6 +147,22 @@ export function sampleDots(
 export type MaskPainter = (ctx: CanvasRenderingContext2D) => void;
 
 /**
+ * Safe getContext: returns null instead of throwing when the environment has
+ * no canvas implementation. jsdom *throws* "Not implemented" rather than
+ * returning null, so a plain `getContext('2d')` would surface in unit tests.
+ */
+function get2dContext(
+  canvas: HTMLCanvasElement,
+  options?: CanvasRenderingContext2DSettings,
+): CanvasRenderingContext2D | null {
+  try {
+    return canvas.getContext('2d', options);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Orchestration glue (touches the DOM). Renders the mask to an offscreen
  * canvas, samples it, and stamps dots onto the target canvas. No-ops if a 2D
  * context is unavailable (e.g. jsdom) so callers don't need to guard.
@@ -156,7 +172,7 @@ export function paintWorldDotMap(
   maskPainter: MaskPainter,
   dotColor: string,
 ): void {
-  const ctx = target.getContext('2d');
+  const ctx = get2dContext(target);
   if (!ctx) return;
   target.width = MAP_WIDTH;
   target.height = MAP_HEIGHT;
@@ -164,7 +180,7 @@ export function paintWorldDotMap(
   const maskCanvas = document.createElement('canvas');
   maskCanvas.width = MAP_WIDTH;
   maskCanvas.height = MAP_HEIGHT;
-  const mask = maskCanvas.getContext('2d', { willReadFrequently: true });
+  const mask = get2dContext(maskCanvas, { willReadFrequently: true });
   if (!mask) return;
   mask.clearRect(0, 0, MAP_WIDTH, MAP_HEIGHT);
   mask.fillStyle = '#fff';
