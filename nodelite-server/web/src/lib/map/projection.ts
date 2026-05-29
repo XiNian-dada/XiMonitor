@@ -42,6 +42,15 @@ export const REGION_HINTS: Record<string, readonly [number, number]> = {
   za: [0.55, 0.74], ng: [0.5, 0.6], eg: [0.55, 0.5],
 };
 
+/** Flag emoji per region key; falls back to a globe. */
+export const COUNTRY_FLAGS: Record<string, string> = {
+  cn: '🇨🇳', hk: '🇭🇰', tw: '🇹🇼', jp: '🇯🇵', kr: '🇰🇷', sg: '🇸🇬',
+  in: '🇮🇳', ae: '🇦🇪', au: '🇦🇺', ru: '🇷🇺', de: '🇩🇪', fr: '🇫🇷',
+  uk: '🇬🇧', gb: '🇬🇧', nl: '🇳🇱', es: '🇪🇸', it: '🇮🇹', us: '🇺🇸',
+  usa: '🇺🇸', ca: '🇨🇦', br: '🇧🇷', ar: '🇦🇷', mx: '🇲🇽', za: '🇿🇦',
+  ng: '🇳🇬', eg: '🇪🇬',
+};
+
 export function hashString(value: string): number {
   let h = 5381;
   for (let i = 0; i < value.length; i++) {
@@ -95,6 +104,12 @@ export function nodePosition(node: NodeListItem): { x: number; y: number } {
   const x = ((seed % 1000) / 1000) * 0.7 + 0.15;
   const y = (((seed >> 7) % 1000) / 1000) * 0.6 + 0.2;
   return { x, y };
+}
+
+export function nodeFlag(node: NodeListItem): string {
+  const region = nodeRegionKey(node);
+  if (region && COUNTRY_FLAGS[region]) return COUNTRY_FLAGS[region];
+  return '🌐';
 }
 
 export function nodeStatusKey(node: NodeListItem): NodeStatus {

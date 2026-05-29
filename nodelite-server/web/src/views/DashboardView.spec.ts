@@ -99,6 +99,7 @@ describe('DashboardView', () => {
     expect(wrapper.find('[data-test="sidebar-nav"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="node-map"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="overview-stats"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="node-list"]').exists()).toBe(true);
   });
 
   it('theme toggle flips the html data-theme attribute', async () => {

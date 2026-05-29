@@ -6,6 +6,7 @@ import {
   clamp01,
   hashString,
   mapProject,
+  nodeFlag,
   nodePosition,
   nodeRegionKey,
   nodeStatusKey,
@@ -107,6 +108,22 @@ describe('nodeStatusKey', () => {
 
   it('returns online when latency is null', () => {
     expect(nodeStatusKey(makeNode({ online: true, latency_ms: null }))).toBe('online');
+  });
+});
+
+describe('nodeFlag', () => {
+  it('returns the region flag when known', () => {
+    const node = makeNode({
+      identity: { node_id: 'x', node_label: 'X', hostname: 'h', tags: ['us'] },
+    });
+    expect(nodeFlag(node)).toBe('🇺🇸');
+  });
+
+  it('falls back to a globe for unknown regions', () => {
+    const node = makeNode({
+      identity: { node_id: 'zzz', node_label: 'Z', hostname: 'host', tags: [] },
+    });
+    expect(nodeFlag(node)).toBe('🌐');
   });
 });
 

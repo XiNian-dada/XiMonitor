@@ -16,6 +16,13 @@ export function makeBootstrap(
 }
 
 export function makeNode(overrides: Partial<NodeListItem> = {}): NodeListItem {
+  // Honor explicitly-passed values by key presence so tests can set
+  // latency_ms / snapshot to null (a plain ?? would coalesce null away).
+  const defaultSnapshot = {
+    cpu_usage_percent: 12.5,
+    load: { one: 0.3 },
+    memory: { total_bytes: 8_000_000_000, used_bytes: 2_000_000_000 },
+  };
   return {
     identity: {
       node_id: 'node-a',
@@ -24,13 +31,9 @@ export function makeNode(overrides: Partial<NodeListItem> = {}): NodeListItem {
       tags: [],
       ...overrides.identity,
     },
-    snapshot: overrides.snapshot ?? {
-      cpu_usage_percent: 12.5,
-      load: { one: 0.3 },
-      memory: { total_bytes: 8_000_000_000, used_bytes: 2_000_000_000 },
-    },
-    latency_ms: overrides.latency_ms ?? 5,
-    online: overrides.online ?? true,
+    snapshot: 'snapshot' in overrides ? (overrides.snapshot ?? null) : defaultSnapshot,
+    latency_ms: 'latency_ms' in overrides ? (overrides.latency_ms ?? null) : 5,
+    online: 'online' in overrides ? (overrides.online ?? false) : true,
   };
 }
 

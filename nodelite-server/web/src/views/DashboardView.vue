@@ -3,6 +3,7 @@ import { computed, onMounted } from 'vue';
 import SidebarNav from '@/components/SidebarNav.vue';
 import OverviewStats from '@/components/OverviewStats.vue';
 import NodeMap from '@/components/NodeMap.vue';
+import NodeList from '@/components/NodeList.vue';
 import { useTheme } from '@/composables/useTheme';
 import { usePolling } from '@/composables/usePolling';
 import { useLanguage } from '@/i18n/language';
@@ -108,7 +109,7 @@ const localeLabels: Record<SupportedLocale, string> = {
       <section class="overview">
         <NodeMap />
         <OverviewStats />
-        <!-- NodeList (PR 2c) mounts here. -->
+        <NodeList />
       </section>
     </main>
   </div>
