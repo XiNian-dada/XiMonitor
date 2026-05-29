@@ -3,7 +3,6 @@ import { mount, flushPromises, RouterLinkStub } from '@vue/test-utils';
 import { createApp, defineComponent, h } from 'vue';
 import { createPinia, setActivePinia } from 'pinia';
 import { setupI18n, getI18n, __resetI18nForTest } from '@/i18n';
-import { apiClient } from '@/api';
 import { useNodesStore } from '@/stores/nodes';
 import { makeNode } from '@/api/__fixtures__/nodes';
 import NodeList from './NodeList.vue';
