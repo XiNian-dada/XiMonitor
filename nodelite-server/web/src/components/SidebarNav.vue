@@ -1,15 +1,9 @@
 <script setup lang="ts">
 import { useRoute } from 'vue-router';
 
+// Settings / Alerts / Account land in Stage 2.5; they render as disabled
+// icon buttons so the rail matches the legacy layout but don't navigate.
 const route = useRoute();
-
-// Settings / Alerts / Account land in Stage 2.5. They render as disabled
-// icon buttons so the rail matches the legacy layout, but don't navigate.
-const navItems = [
-  { tab: 'overview', to: '/', enabled: true },
-  { tab: 'settings', to: null, enabled: false },
-  { tab: 'alerts', to: null, enabled: false },
-] as const;
 </script>
 
 <template>
@@ -17,7 +11,6 @@ const navItems = [
     <RouterLink class="brand" to="/" title="NodeLite" aria-label="NodeLite" />
 
     <RouterLink
-      v-if="navItems[0]"
       class="nav-button"
       :class="{ active: route.path === '/' }"
       to="/"
@@ -44,7 +37,6 @@ const navItems = [
       type="button"
       class="nav-button"
       disabled
-      aria-disabled="true"
       :title="`${$t('index.nav.settings')} (Stage 2.5)`"
       :aria-label="$t('index.nav.settings')"
       data-test="nav-settings"
@@ -68,7 +60,6 @@ const navItems = [
       type="button"
       class="nav-button"
       disabled
-      aria-disabled="true"
       :title="`${$t('index.nav.alerts')} (Stage 2.5)`"
       :aria-label="$t('index.nav.alerts')"
       data-test="nav-alerts"
@@ -91,7 +82,6 @@ const navItems = [
         type="button"
         class="nav-button avatar-button"
         disabled
-        aria-disabled="true"
         :title="`${$t('index.nav.account')} (Stage 2.5)`"
         :aria-label="$t('index.nav.account')"
         data-test="nav-account"

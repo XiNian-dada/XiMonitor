@@ -82,7 +82,6 @@ describe('SidebarNav', () => {
     for (const tab of ['nav-settings', 'nav-alerts', 'nav-account']) {
       const el = wrapper.find(`[data-test="${tab}"]`);
       expect(el.attributes('disabled')).toBeDefined();
-      expect(el.attributes('aria-disabled')).toBe('true');
     }
   });
 });
