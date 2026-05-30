@@ -13,11 +13,16 @@ vi.mock('@/api', async () => {
   const actual = await vi.importActual<typeof import('@/api')>('@/api');
   return {
     ...actual,
-    apiClient: { ...actual.apiClient, nodeStatus: vi.fn() },
+    apiClient: {
+      ...actual.apiClient,
+      nodeStatus: vi.fn(),
+      nodeHistory: vi.fn().mockResolvedValue([]),
+    },
   };
 });
 
 const mockStatus = vi.mocked(apiClient.nodeStatus);
+const mockHistory = vi.mocked(apiClient.nodeHistory);
 
 const FAKE_DICT = {
   en: {
@@ -30,6 +35,37 @@ const FAKE_DICT = {
     'node.meta.ip': 'IP: {ip}',
     'node.meta.uptime_days': 'Up {days}d',
     'node.meta.uptime_hours': 'Up {hours}h',
+    'node.info.title': 'Server Info',
+    'node.info.os': 'OS',
+    'node.info.kernel': 'Kernel',
+    'node.info.cpu': 'CPU',
+    'node.info.memory': 'Memory',
+    'node.info.disk': 'Disk',
+    'node.info.virtualization': 'Agent',
+    'node.info.uptime': 'Uptime',
+    'node.info.cores': '{count} Core(s)',
+    'node.uptime.days_hours': '{days}d {hours}h {minutes}m',
+    'node.uptime.hours_minutes': '{hours}h {minutes}m',
+    'node.uptime.minutes': '{minutes}m',
+    'node.disk_usage': 'Disk Usage',
+    'node.load': 'Load',
+    'node.no_disks': 'No disk metrics.',
+    'node.disk.device': 'Device',
+    'node.disk.mount': 'Mount',
+    'node.disk.filesystem': 'FS',
+    'node.disk.usage': 'Usage',
+    'node.disk.capacity': 'Capacity',
+    'node.cpu_usage': 'CPU Usage',
+    'node.memory_usage': 'Memory Usage',
+    'node.network_traffic': 'Network Traffic',
+    'node.latency_history': 'RTT',
+    'node.chart.average': 'Avg {value}',
+    'node.waiting_history': 'Waiting…',
+    'index.node.download': 'Down',
+    'index.node.upload': 'Up',
+    'common.unknown': 'Unknown',
+    'common.unknown_os': 'unknown os',
+    'common.not_available': 'n/a',
     'common.online': 'Online',
     'common.offline': 'Offline',
     'common.latency_warn': 'High latency',
@@ -128,5 +164,29 @@ describe('NodeDetailView', () => {
     await flushPromises();
     expect(wrapper.find('[data-test="node-tab-pane"]').attributes('data-pane')).toBe('monitor');
     expect(wrapper.find('[data-test="tab-monitor"]').classes()).toContain('active');
+  });
+
+  it('renders overview content (info panel + summary + charts) and loads history', async () => {
+    const { wrapper } = await mountDetail('srv-1');
+    expect(wrapper.find('[data-test="node-info-panel"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="node-summary-cards"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="overview-charts"]').exists()).toBe(true);
+    // overview is a history tab → overview history fetched on mount
+    expect(mockHistory).toHaveBeenCalledWith('srv-1', expect.objectContaining({ windowHours: 336 }));
+  });
+
+  it('shows the network pane on the network tab', async () => {
+    const { wrapper, router } = await mountDetail('srv-1');
+    await router.replace({ hash: '#network' });
+    await flushPromises();
+    expect(wrapper.find('[data-test="network-pane"]').exists()).toBe(true);
+  });
+
+  it('shows disks on the hardware tab', async () => {
+    const { wrapper, router } = await mountDetail('srv-1');
+    await router.replace({ hash: '#hardware' });
+    await flushPromises();
+    expect(wrapper.find('[data-test="node-disks"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="node-info-panel"]').exists()).toBe(true);
   });
 });

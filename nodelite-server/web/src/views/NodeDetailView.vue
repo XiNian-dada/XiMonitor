@@ -2,11 +2,20 @@
 import { computed, onMounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import AppLayout from '@/components/AppLayout.vue';
+import NodeInfoPanel from '@/components/NodeInfoPanel.vue';
+import NodeSummaryCards from '@/components/NodeSummaryCards.vue';
+import OverviewCharts from '@/components/OverviewCharts.vue';
+import NodeDisks from '@/components/NodeDisks.vue';
+import MetricChart from '@/components/MetricChart.vue';
 import { usePolling } from '@/composables/usePolling';
 import { nodeStatusKey } from '@/lib/map/projection';
 import { ipFromNode, locationFromNode } from '@/lib/nodeMeta';
-import { uptimeParts } from '@/lib/format';
+import { uptimeParts, fmtBytes, fmtRate } from '@/lib/format';
+import { buildChartData } from '@/lib/chart/chartData';
+import { formatChartValue } from '@/lib/chart/format';
+import { useI18n } from 'vue-i18n';
 import { useNodeStatusStore } from '@/stores/nodeStatus';
+import { useDetailHistoryStore } from '@/stores/detailHistory';
 
 const NODE_DETAIL_REFRESH_MS = 5000;
 
@@ -21,7 +30,9 @@ function isTabId(value: string): value is TabId {
 
 const route = useRoute();
 const router = useRouter();
+const { t } = useI18n();
 const store = useNodeStatusStore();
+const historyStore = useDetailHistoryStore();
 
 const nodeId = computed(() => String(route.params.id ?? ''));
 const node = computed(() => store.data);
@@ -56,16 +67,55 @@ const ip = computed(() => (node.value ? ipFromNode(node.value) : null));
 const location = computed(() => (node.value ? locationFromNode(node.value) : null));
 const uptime = computed(() => uptimeParts(node.value?.snapshot?.uptime_secs));
 
+// Tabs that render history charts; only those trigger the overview-history
+// fetch (mirrors legacy detailHistoryNeedsData; monitor lands in 3d).
+const historyNeeded = computed(
+  () => activeTab.value === 'overview' || activeTab.value === 'network',
+);
+
+// Network tab values (legacy renderSummaryCards net block).
+const net = computed(() => {
+  const n = node.value?.snapshot?.network;
+  return {
+    downRate: fmtRate(n?.rx_bytes_per_sec) ?? '—',
+    upRate: fmtRate(n?.tx_bytes_per_sec) ?? '—',
+    downTotal: fmtBytes(n?.total_rx_bytes) ?? '—',
+    upTotal: fmtBytes(n?.total_tx_bytes) ?? '—',
+    latency: node.value?.latency_ms == null ? '—' : formatChartValue(node.value.latency_ms, 'latency'),
+  };
+});
+const networkSeries = computed(() => {
+  const data = buildChartData(historyStore.points);
+  return [
+    { label: t('index.node.download'), color: 'var(--chart-network-down)', points: data.dlPts },
+    { label: t('index.node.upload'), color: 'var(--chart-network-up)', points: data.upPts },
+  ];
+});
+
+function ensureHistory(): void {
+  if (historyNeeded.value && nodeId.value) void historyStore.load(nodeId.value);
+}
+
 onMounted(() => {
   void store.load(nodeId.value);
+  ensureHistory();
 });
 
-// Navigating between nodes (same component, new :id) reloads.
+// Navigating between nodes (same component, new :id) reloads both.
 watch(nodeId, (id) => {
   if (id) void store.load(id);
+  ensureHistory();
 });
 
-usePolling(() => store.refresh(), NODE_DETAIL_REFRESH_MS);
+// Switching into a history tab lazily loads the overview history.
+watch(historyNeeded, (needed) => {
+  if (needed) ensureHistory();
+});
+
+usePolling(() => {
+  void store.refresh();
+  if (historyNeeded.value) void historyStore.refresh();
+}, NODE_DETAIL_REFRESH_MS);
 </script>
 
 <template>
@@ -110,7 +160,48 @@ usePolling(() => store.refresh(), NODE_DETAIL_REFRESH_MS);
       </nav>
 
       <section class="tab-pane" :data-pane="activeTab" data-test="node-tab-pane">
-        <p class="placeholder">{{ activeTab }} — coming in Stage 3c/3d</p>
+        <template v-if="activeTab === 'overview'">
+          <div class="overview-grid">
+            <NodeInfoPanel :node="node" />
+            <NodeSummaryCards :node="node" />
+          </div>
+          <OverviewCharts :node="node" :history="historyStore.points" />
+        </template>
+
+        <template v-else-if="activeTab === 'network'">
+          <div class="net-stats" data-test="network-pane">
+            <div class="net-stat">
+              <span class="net-stat__label">↓ {{ $t('index.node.download') }}</span>
+              <strong>{{ net.downRate }}</strong>
+              <small>total {{ net.downTotal }}</small>
+            </div>
+            <div class="net-stat">
+              <span class="net-stat__label">↑ {{ $t('index.node.upload') }}</span>
+              <strong>{{ net.upRate }}</strong>
+              <small>total {{ net.upTotal }}</small>
+            </div>
+            <div class="net-stat">
+              <span class="net-stat__label">{{ $t('node.latency_history') }}</span>
+              <strong>{{ net.latency }}</strong>
+            </div>
+          </div>
+          <article class="panel">
+            <MetricChart :series="networkSeries" value-kind="rate" :min-value="0" :height="240" />
+          </article>
+        </template>
+
+        <template v-else-if="activeTab === 'hardware'">
+          <div class="overview-grid">
+            <NodeInfoPanel :node="node" />
+          </div>
+          <article class="panel">
+            <NodeDisks :node="node" />
+          </article>
+        </template>
+
+        <p v-else class="placeholder" data-test="pane-placeholder">
+          {{ activeTab }} — coming in Stage 3d
+        </p>
       </section>
     </div>
   </AppLayout>
@@ -197,5 +288,50 @@ usePolling(() => store.refresh(), NODE_DETAIL_REFRESH_MS);
 .placeholder {
   color: var(--text-muted);
   font-size: 13px;
+}
+.overview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: 14px;
+  margin-bottom: 14px;
+  align-items: start;
+}
+.panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: 16px;
+  padding: 16px 18px;
+}
+.net-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.net-stat {
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: 16px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.net-stat__label {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.net-stat strong {
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+.net-stat small {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+@media (max-width: 880px) {
+  .overview-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 </style>

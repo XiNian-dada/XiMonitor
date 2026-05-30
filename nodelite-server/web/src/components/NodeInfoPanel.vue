@@ -12,9 +12,10 @@ const { t } = useI18n();
 function uptimeText(seconds: number | null | undefined): string {
   const parts = uptimeParts(seconds);
   if (!parts) return t('common.not_available');
-  if (parts.days > 0) return t('node.uptime.days_hours', parts);
-  if (parts.hours > 0) return t('node.uptime.hours_minutes', parts);
-  return t('node.uptime.minutes', parts);
+  const named = { days: parts.days, hours: parts.hours, minutes: parts.minutes };
+  if (parts.days > 0) return t('node.uptime.days_hours', named);
+  if (parts.hours > 0) return t('node.uptime.hours_minutes', named);
+  return t('node.uptime.minutes', named);
 }
 
 const rows = computed<Array<{ label: string; value: string }>>(() => {
