@@ -106,4 +106,29 @@ describe('useDetailHistoryStore', () => {
     await store.refresh();
     expect(mockHistory).not.toHaveBeenCalled();
   });
+
+  it('loadIfStale throttles same-node re-entry but fetches on node switch', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    mockHistory.mockResolvedValue([]);
+    const store = useDetailHistoryStore();
+
+    await store.loadIfStale('a'); // first load
+    expect(mockHistory).toHaveBeenCalledTimes(1);
+
+    // same node, within throttle window → no refetch (the parity fix)
+    vi.setSystemTime(2_000_000 + NODE_HISTORY_REFRESH_MS - 1);
+    await store.loadIfStale('a');
+    expect(mockHistory).toHaveBeenCalledTimes(1);
+
+    // different node → always fetches
+    await store.loadIfStale('b');
+    expect(mockHistory).toHaveBeenCalledTimes(2);
+    expect(store.nodeId).toBe('b');
+
+    // same node again but now stale → refetches
+    vi.setSystemTime(2_000_000 + NODE_HISTORY_REFRESH_MS * 4);
+    await store.loadIfStale('b');
+    expect(mockHistory).toHaveBeenCalledTimes(3);
+  });
 });

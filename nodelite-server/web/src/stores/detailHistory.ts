@@ -50,13 +50,35 @@ export const useDetailHistoryStore = defineStore('detailHistory', () => {
     }
   }
 
-  /** Switch to a node (clears stale points) and fetch its overview history. */
+  function switchTo(id: string): boolean {
+    if (nodeId.value === id) return false;
+    nodeId.value = id;
+    points.value = [];
+    error.value = null;
+    fetchedAt.value = 0;
+    return true;
+  }
+
+  /** Switch to a node (clears stale points) and force-fetch its history. */
   async function load(id: string): Promise<void> {
-    if (nodeId.value !== id) {
-      nodeId.value = id;
-      points.value = [];
-      error.value = null;
-      fetchedAt.value = 0;
+    switchTo(id);
+    await fetchFor(id);
+  }
+
+  /**
+   * Switch-or-throttled load for tab entry: a new node always fetches; the
+   * same node only refetches once >=15s stale. Mirrors legacy
+   * fetchOverviewHistory, which throttles regardless of caller — so
+   * re-entering a history tab within the window doesn't re-pull the 14-day
+   * series.
+   */
+  async function loadIfStale(id: string): Promise<void> {
+    if (switchTo(id)) {
+      await fetchFor(id);
+      return;
+    }
+    if (fetchedAt.value > 0 && Date.now() - fetchedAt.value < NODE_HISTORY_REFRESH_MS) {
+      return;
     }
     await fetchFor(id);
   }
@@ -71,5 +93,5 @@ export const useDetailHistoryStore = defineStore('detailHistory', () => {
     await fetchFor(id);
   }
 
-  return { nodeId, points, loading, error, load, refresh };
+  return { nodeId, points, loading, error, load, loadIfStale, refresh };
 });

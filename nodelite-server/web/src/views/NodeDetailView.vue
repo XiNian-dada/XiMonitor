@@ -93,7 +93,9 @@ const networkSeries = computed(() => {
 });
 
 function ensureHistory(): void {
-  if (historyNeeded.value && nodeId.value) void historyStore.load(nodeId.value);
+  // loadIfStale (not load) so re-entering a history tab within the throttle
+  // window reuses the cached series, matching legacy fetchOverviewHistory.
+  if (historyNeeded.value && nodeId.value) void historyStore.loadIfStale(nodeId.value);
 }
 
 onMounted(() => {
