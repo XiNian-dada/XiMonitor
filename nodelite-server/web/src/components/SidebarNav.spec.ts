@@ -30,6 +30,7 @@ function makeRouter(): Router {
       { path: '/nodes/:id', name: 'node-detail', component: Stub },
       { path: '/settings', name: 'settings', component: Stub },
       { path: '/account', name: 'account', component: Stub },
+      { path: '/alerts', name: 'alerts', component: Stub },
     ],
   });
 }
@@ -97,12 +98,14 @@ describe('SidebarNav', () => {
     expect(account.classes()).toContain('active');
   });
 
-  it('still disables the not-yet-built button (alerts)', async () => {
+  it('links Alerts and marks it active on /alerts', async () => {
     const router = makeRouter();
-    await router.push('/');
+    await router.push('/alerts');
     await router.isReady();
     const wrapper = mount(SidebarNav, { global: { plugins: [router, getI18n()] } });
 
-    expect(wrapper.find('[data-test="nav-alerts"]').attributes('disabled')).toBeDefined();
+    const alerts = wrapper.find('[data-test="nav-alerts"]');
+    expect(alerts.attributes('disabled')).toBeUndefined();
+    expect(alerts.classes()).toContain('active');
   });
 });

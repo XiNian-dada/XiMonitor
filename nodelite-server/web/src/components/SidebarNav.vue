@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { useRoute } from 'vue-router';
 
-// Alerts lands later in Stage 2.5; it renders as a disabled icon button so
-// the rail matches the legacy layout but doesn't navigate yet.
 const route = useRoute();
 </script>
 
@@ -56,11 +54,11 @@ const route = useRoute();
       </svg>
     </RouterLink>
 
-    <button
-      type="button"
+    <RouterLink
       class="nav-button"
-      disabled
-      :title="`${$t('index.nav.alerts')} (Stage 2.5)`"
+      :class="{ active: route.path === '/alerts' }"
+      to="/alerts"
+      :title="$t('index.nav.alerts')"
       :aria-label="$t('index.nav.alerts')"
       data-test="nav-alerts"
     >
@@ -75,7 +73,7 @@ const route = useRoute();
         <path d="M15 17h5l-1.4-1.4A2 2 0 0 1 18 14.2V11a6 6 0 1 0-12 0v3.2a2 2 0 0 1-.6 1.4L4 17h5" />
         <path d="M9 17a3 3 0 0 0 6 0" />
       </svg>
-    </button>
+    </RouterLink>
 
     <div class="sidebar-bottom">
       <RouterLink
