@@ -15,9 +15,16 @@ const LOGOUT_DELAY_MS = 900;
 const form = reactive({ current_password: '', new_password: '' });
 const message = reactive<{ state: 'ok' | 'error' | null; text: string }>({ state: null, text: '' });
 const busy = ref(false);
+// Reveal the new-password field after generating so the user can read/copy
+// the value before the post-submit redirect to /logout-and-reauth.
+const revealNew = ref(false);
+// On success the page navigates away after a short delay; keep the submit
+// disabled through that window so a double-click can't fire a stale retry.
+const leaving = ref(false);
 
 function suggest(): void {
   form.new_password = generatePassword();
+  revealNew.value = true;
 }
 
 /** Drop the client session and bounce to reauth (same as logout). */
@@ -43,6 +50,7 @@ async function submit(): Promise<void> {
     message.text = t('settings.password.saved');
     // Password changed → session is invalidated; show the message briefly,
     // then drop to reauth (matches legacy 900ms behavior).
+    leaving.value = true;
     window.setTimeout(finishLogout, LOGOUT_DELAY_MS);
   } catch (e) {
     if (e instanceof ApiAbortError) return;
@@ -72,7 +80,7 @@ async function submit(): Promise<void> {
         <span>{{ t('settings.password.new') }}</span>
         <input
           v-model="form.new_password"
-          type="password"
+          :type="revealNew ? 'text' : 'password'"
           autocomplete="new-password"
           minlength="8"
           data-test="password-new"
@@ -83,7 +91,7 @@ async function submit(): Promise<void> {
         <button type="button" class="btn" data-test="password-generate" @click="suggest">
           {{ t('settings.password.generate') }}
         </button>
-        <button type="submit" class="btn btn--primary" :disabled="busy" data-test="password-submit">
+        <button type="submit" class="btn btn--primary" :disabled="busy || leaving" data-test="password-submit">
           {{ t('settings.password.submit') }}
         </button>
       </div>

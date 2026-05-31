@@ -62,11 +62,15 @@ describe('ChangePasswordCard', () => {
     Object.defineProperty(window, 'location', { configurable: true, value: originalLocation });
   });
 
-  it('generate fills a strong new password', async () => {
+  it('generate fills a strong new password and reveals it', async () => {
     const wrapper = mountCard();
+    const field = wrapper.find('[data-test="password-new"]');
+    expect(field.attributes('type')).toBe('password');
     await wrapper.find('[data-test="password-generate"]').trigger('click');
-    const value = (wrapper.find('[data-test="password-new"]').element as HTMLInputElement).value;
-    expect(value.length).toBeGreaterThanOrEqual(8);
+    const input = field.element as HTMLInputElement;
+    expect(input.value.length).toBeGreaterThanOrEqual(8);
+    // revealed so the user can read/copy before the post-submit redirect
+    expect(field.attributes('type')).toBe('text');
   });
 
   it('on success: clears the auth timestamp and navigates to logout-and-reauth', async () => {
@@ -81,6 +85,8 @@ describe('ChangePasswordCard', () => {
 
     expect(mockChange).toHaveBeenCalledWith({ current_password: 'old', new_password: 'newpassword1' });
     expect(wrapper.find('[data-test="settings-message"]').text()).toContain('sign in again');
+    // submit stays disabled through the logout window (no stale double-submit)
+    expect(wrapper.find('[data-test="password-submit"]').attributes('disabled')).toBeDefined();
     // navigation happens after the brief delay
     expect(assignSpy).not.toHaveBeenCalled();
     vi.advanceTimersByTime(900);

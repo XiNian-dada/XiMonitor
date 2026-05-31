@@ -12,10 +12,12 @@ import { useI18n } from 'vue-i18n';
  */
 const props = withDefaults(
   defineProps<{
-    twoFactorEnabled: boolean;
+    // Only consulted by the 'server-update' and 'standard' variants; 'both'
+    // always shows password + code, so callers using it can omit this.
+    twoFactorEnabled?: boolean;
     variant?: 'server-update' | 'standard' | 'both';
   }>(),
-  { variant: 'standard' },
+  { twoFactorEnabled: false, variant: 'standard' },
 );
 
 const currentPassword = defineModel<string>('currentPassword', { default: '' });

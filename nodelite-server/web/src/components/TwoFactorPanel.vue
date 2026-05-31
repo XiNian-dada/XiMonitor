@@ -110,7 +110,6 @@ async function disable(): Promise<void> {
         <ReauthFields
           v-model:current-password="form.currentPassword"
           v-model:code="form.code"
-          :two-factor-enabled="true"
           variant="both"
         />
         <button type="submit" class="btn btn--danger" :disabled="busy" data-test="disable-2fa">
@@ -137,7 +136,6 @@ async function disable(): Promise<void> {
         <ReauthFields
           v-model:current-password="form.currentPassword"
           v-model:code="form.code"
-          :two-factor-enabled="true"
           variant="both"
         />
         <div class="actions">
