@@ -29,6 +29,7 @@ function makeRouter(): Router {
       { path: '/', name: 'dashboard', component: Stub },
       { path: '/nodes/:id', name: 'node-detail', component: Stub },
       { path: '/settings', name: 'settings', component: Stub },
+      { path: '/account', name: 'account', component: Stub },
     ],
   });
 }
@@ -85,15 +86,23 @@ describe('SidebarNav', () => {
     expect(settings.classes()).toContain('active');
   });
 
-  it('still disables the not-yet-built buttons (alerts/account)', async () => {
+  it('links Account and marks it active on /account', async () => {
+    const router = makeRouter();
+    await router.push('/account');
+    await router.isReady();
+    const wrapper = mount(SidebarNav, { global: { plugins: [router, getI18n()] } });
+
+    const account = wrapper.find('[data-test="nav-account"]');
+    expect(account.attributes('disabled')).toBeUndefined();
+    expect(account.classes()).toContain('active');
+  });
+
+  it('still disables the not-yet-built button (alerts)', async () => {
     const router = makeRouter();
     await router.push('/');
     await router.isReady();
     const wrapper = mount(SidebarNav, { global: { plugins: [router, getI18n()] } });
 
-    for (const tab of ['nav-alerts', 'nav-account']) {
-      const el = wrapper.find(`[data-test="${tab}"]`);
-      expect(el.attributes('disabled')).toBeDefined();
-    }
+    expect(wrapper.find('[data-test="nav-alerts"]').attributes('disabled')).toBeDefined();
   });
 });

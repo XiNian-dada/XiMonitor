@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { useRoute } from 'vue-router';
 
-// Settings / Alerts / Account land in Stage 2.5; they render as disabled
-// icon buttons so the rail matches the legacy layout but don't navigate.
+// Alerts lands later in Stage 2.5; it renders as a disabled icon button so
+// the rail matches the legacy layout but doesn't navigate yet.
 const route = useRoute();
 </script>
 
@@ -78,11 +78,11 @@ const route = useRoute();
     </button>
 
     <div class="sidebar-bottom">
-      <button
-        type="button"
+      <RouterLink
         class="nav-button avatar-button"
-        disabled
-        :title="`${$t('index.nav.account')} (Stage 2.5)`"
+        :class="{ active: route.path === '/account' }"
+        to="/account"
+        :title="$t('index.nav.account')"
         :aria-label="$t('index.nav.account')"
         data-test="nav-account"
       >
@@ -99,7 +99,7 @@ const route = useRoute();
             <circle cx="12" cy="7" r="4" />
           </svg>
         </div>
-      </button>
+      </RouterLink>
     </div>
   </aside>
 </template>
