@@ -23,7 +23,7 @@ use chrono::Utc;
 use nodelite_proto::{
     NodeIdentity, NodeListItem, NodeSnapshot, NodeStatus, OverviewData, ServerConfig,
 };
-use tokio::sync::{Mutex, RwLock, oneshot};
+use tokio::sync::{Mutex, RwLock, broadcast, oneshot};
 
 use self::registry::Registry;
 pub(crate) use self::session_control::{
@@ -46,6 +46,16 @@ use crate::ServerReadiness;
 use crate::handlers::metrics_exporter::{
     ApiCacheMetrics, SqliteWalCheckpointMetrics, WsMessageMetrics,
 };
+
+/// 浏览器视图脏信号。节点视图发生任意变化(注册 / 快照 / 延迟 / 离线 / 批量过期)时
+/// 广播一次,促使每个浏览器 WebSocket 会话重算节点列表、与上次发送的快照做 diff,
+/// 再发出增量。无 payload:会话总是重新读取完整视图,不需要携带变化详情。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BrowserViewDirty;
+
+/// 浏览器脏信号广播通道容量。200 节点 × 1Hz ≈ 200 信号/秒;某个会话若停顿超过
+/// 约 1.3 秒(256 / 200)就会 Lagged,届时会话回退到重发 InitialState 全量同步。
+const BROWSER_VIEW_DIRTY_CHANNEL_CAPACITY: usize = 256;
 
 /// 共享状态的对外句柄,可以低成本地克隆给每个异步任务。
 #[derive(Clone)]
@@ -77,6 +87,8 @@ pub struct SharedState {
     ws_messages_pong_total: Arc<AtomicU64>,
     ws_messages_refresh_token_request_total: Arc<AtomicU64>,
     session_control_queue_full_total: Arc<AtomicU64>,
+    /// 节点视图变化时向所有浏览器 WebSocket 会话广播脏信号。
+    browser_view_dirty_tx: broadcast::Sender<BrowserViewDirty>,
     #[cfg(test)]
     metrics_cache_builds: Arc<AtomicU64>,
 }
@@ -111,6 +123,7 @@ impl SharedState {
             ws_messages_pong_total: Arc::new(AtomicU64::new(0)),
             ws_messages_refresh_token_request_total: Arc::new(AtomicU64::new(0)),
             session_control_queue_full_total: Arc::new(AtomicU64::new(0)),
+            browser_view_dirty_tx: broadcast::channel(BROWSER_VIEW_DIRTY_CHANNEL_CAPACITY).0,
             #[cfg(test)]
             metrics_cache_builds: Arc::new(AtomicU64::new(0)),
         }
@@ -362,6 +375,23 @@ impl SharedState {
         registry.overview()
     }
 
+    /// 供浏览器 WebSocket 会话读取当前概览聚合(在准备发送 OverviewUpdate 时惰性调用)。
+    pub(crate) async fn overview_snapshot(&self) -> OverviewData {
+        self.overview_data().await
+    }
+
+    /// 订阅浏览器视图脏信号。每个浏览器会话持有一个 receiver,在信号到达后
+    /// 重算节点列表并发出增量。
+    pub(crate) fn subscribe_browser_updates(&self) -> broadcast::Receiver<BrowserViewDirty> {
+        self.browser_view_dirty_tx.subscribe()
+    }
+
+    /// 广播一次浏览器视图脏信号。没有订阅者(无浏览器连接)时 `send` 返回
+    /// `Err`,直接忽略即可。
+    fn notify_browser_view_dirty(&self) {
+        let _ = self.browser_view_dirty_tx.send(BrowserViewDirty);
+    }
+
     /// 启动时从磁盘快照恢复状态,所有节点都视为离线直至首次心跳到达。
     pub async fn restore_statuses(&self, statuses: Vec<NodeStatus>) {
         let mut registry = self.registry.write().await;
@@ -374,6 +404,7 @@ impl SharedState {
         self.overview_revision.fetch_add(1, Ordering::AcqRel);
         self.nodes_revision.fetch_add(1, Ordering::AcqRel);
         self.metrics_revision.fetch_add(1, Ordering::AcqRel);
+        self.notify_browser_view_dirty();
     }
 
     /// 单节点快照 / 延迟更新只让 nodes 视图立刻失效。
@@ -382,6 +413,7 @@ impl SharedState {
     /// 缓存连带打穿(见 issue #160)。
     fn bump_nodes_revision_only(&self) {
         self.nodes_revision.fetch_add(1, Ordering::AcqRel);
+        self.notify_browser_view_dirty();
     }
 
     fn json_slot_for(&self, kind: ApiBodyKind) -> &Arc<Mutex<JsonViewSlot>> {

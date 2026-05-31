@@ -17,17 +17,18 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tower_http::trace::TraceLayer;
 
 use crate::handlers::{metrics, node_history, node_status, nodes, overview, require_readonly_auth};
 use crate::registry::{IssueNodeRequest, NodeRegistry, issue_node};
 use crate::set_protected_response_headers;
 use crate::state::{SessionRefreshReply, SharedState};
-use crate::ws::ws_handler;
+use crate::ws::{ws_browser_handler, ws_handler};
 use nodelite_proto::{
-    AuditConfig, DiskUsage, HelloMessage, HistoryPoint, LoadAverage, MemoryUsage, NetworkCounters,
-    NodeIdentity, NodeSnapshot, NodeStatus, NoticeLevel, OverviewData, ReadonlyAuthConfig,
-    RefreshTokenResponseMessage, ServerConfig, WireMessage, WsConfig,
+    AuditConfig, BrowserMessage, DiskUsage, HelloMessage, HistoryPoint, LoadAverage, MemoryUsage,
+    NetworkCounters, NodeIdentity, NodeSnapshot, NodeStatus, NoticeLevel, OverviewData,
+    ReadonlyAuthConfig, RefreshTokenResponseMessage, ServerConfig, WireMessage, WsConfig,
 };
 
 pub const TEST_BASIC_AUTH_HEADER: &str = "Basic dmlld2VyOnNlY3JldA==";
@@ -183,6 +184,7 @@ impl TestServer {
             .route("/api/nodes", get(nodes))
             .route("/api/nodes/{node_id}", get(node_status))
             .route("/api/nodes/{node_id}/history", get(node_history))
+            .route("/ws/browser", get(ws_browser_handler))
             .route_layer(from_fn(set_protected_response_headers))
             .route_layer(from_fn_with_state(state.clone(), require_readonly_auth));
         let app = Router::new()
@@ -519,6 +521,101 @@ impl TestAgent {
         })
         .await
         .context("timed out waiting for business message")?
+    }
+}
+
+/// 浏览器 WebSocket(`/ws/browser`)测试客户端。
+pub struct TestBrowserClient {
+    socket: TestSocket,
+}
+
+impl TestBrowserClient {
+    /// 带正确 Basic Auth 连接 `/ws/browser`。
+    pub async fn connect(server: &TestServer) -> Result<Self> {
+        let mut request = format!("ws://{}/ws/browser", server.addr)
+            .into_client_request()
+            .context("build browser ws request")?;
+        request.headers_mut().insert(
+            tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+            tokio_tungstenite::tungstenite::http::HeaderValue::from_static(TEST_BASIC_AUTH_HEADER),
+        );
+        let (socket, _response) = connect_async(request)
+            .await
+            .context("connect browser ws client")?;
+        Ok(Self { socket })
+    }
+
+    /// 不带认证连接,期望握手被拒为 HTTP 401。
+    pub async fn expect_unauthorized(server: &TestServer) -> Result<()> {
+        let url = format!("ws://{}/ws/browser", server.addr);
+        match connect_async(url).await {
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                let status = response.status();
+                if status == tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED {
+                    Ok(())
+                } else {
+                    bail!("expected 401 for unauthenticated browser ws, got {status}")
+                }
+            }
+            Ok(_) => bail!("expected unauthenticated browser ws connect to be rejected"),
+            Err(other) => bail!("expected http 401 error, got {other}"),
+        }
+    }
+
+    /// 接收下一条 `BrowserMessage`(忽略协议级 ping/pong / 二进制帧)。
+    pub async fn next_message(&mut self, timeout_duration: Duration) -> Result<BrowserMessage> {
+        timeout(timeout_duration, async {
+            loop {
+                match self.socket.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        return serde_json::from_str::<BrowserMessage>(&text)
+                            .context("decode browser message");
+                    }
+                    Some(Ok(Message::Close(frame))) => {
+                        bail!("browser ws closed before message: {frame:?}");
+                    }
+                    Some(Ok(_)) => {} // 忽略协议级 ping/pong/binary
+                    Some(Err(error)) => bail!("browser ws receive error: {error}"),
+                    None => bail!("browser ws stream ended"),
+                }
+            }
+        })
+        .await
+        .context("timed out waiting for browser message")?
+    }
+
+    /// 循环接收直到出现满足谓词的 `BrowserMessage`,跳过其它消息(如 OverviewUpdate)。
+    pub async fn next_matching<F>(
+        &mut self,
+        timeout_duration: Duration,
+        mut predicate: F,
+    ) -> Result<BrowserMessage>
+    where
+        F: FnMut(&BrowserMessage) -> bool,
+    {
+        timeout(timeout_duration, async {
+            loop {
+                let message = self.next_message(TEST_TIMEOUT).await?;
+                if predicate(&message) {
+                    return Ok(message);
+                }
+            }
+        })
+        .await
+        .context("timed out waiting for matching browser message")?
+    }
+
+    /// 发送应用层 `Ping`。
+    pub async fn send_ping(&mut self) -> Result<()> {
+        let payload = serde_json::to_string(&BrowserMessage::Ping).context("encode ping")?;
+        self.socket
+            .send(Message::Text(payload.into()))
+            .await
+            .context("send browser ping")
+    }
+
+    pub async fn close(mut self) -> Result<()> {
+        self.socket.close(None).await.context("close browser ws")
     }
 }
 

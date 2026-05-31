@@ -46,7 +46,7 @@ use crate::history::HistoryStore;
 use crate::registry::NodeRegistry;
 use crate::snapshot::{load_snapshot, persist_snapshot, spawn_snapshot_persistor};
 use crate::state::SharedState;
-use crate::ws::ws_handler;
+use crate::ws::{ws_browser_handler, ws_handler};
 
 pub(crate) const PROTECTED_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; img-src 'self' data:; \
      connect-src 'self' https://raw.githubusercontent.com https://api.github.com; font-src 'self'; \
@@ -161,6 +161,7 @@ async fn initialize_server_runtime(
         registry,
         shared,
         ws_admission: WsAdmissionController::new(&config.ws),
+        browser_ws_admission: WsAdmissionController::new(&config.ws),
         readonly_auth: Arc::new(RwLock::new(readonly_route_auth)),
         alerting: Arc::new(RwLock::new(config.alerting.clone())),
         two_factor_sessions: TwoFactorSessions::new(),
@@ -319,6 +320,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/nodes/{node_id}/history", get(node_history))
         .route("/api/nodes/{node_id}/logs", get(node_logs))
         .route("/api/audit-log", get(audit_log))
+        .route("/ws/browser", get(ws_browser_handler))
         .route("/api/settings", get(settings))
         .route("/api/settings/alerts", get(alert_settings))
         .route("/api/settings/update/server/log", get(server_update_log))
