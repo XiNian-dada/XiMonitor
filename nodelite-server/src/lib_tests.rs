@@ -624,6 +624,130 @@ fn readonly_auth_route_accepts_valid_basic_auth() {
     });
 }
 
+/// 构造一个开启/关闭 2FA 的受保护认证测试状态,返回 (state, temp_dir)。
+async fn two_factor_auth_test_state(label: &str, enable_2fa: bool) -> (AppState, PathBuf) {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be monotonic enough")
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!("nodelite-{label}-{unique}"));
+    std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+    let mut config = test_server_config(
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
+        "https://monitor.example.com".to_string(),
+        temp_dir.join("server.json"),
+        temp_dir.join("history.sqlite3"),
+        temp_dir.join("snapshot.json"),
+    );
+    config.readonly_auth = Some(nodelite_proto::ReadonlyAuthConfig {
+        username: "viewer".to_string(),
+        password: "secret".to_string(),
+        enable_2fa,
+        totp_secret: enable_2fa.then(|| "JBSWY3DPEHPK3PXP".to_string()),
+    });
+    let state = AppState::test_fixture(config.into(), Arc::new(temp_dir.join("server.toml")))
+        .await
+        .expect("state fixture should build");
+    (state, temp_dir)
+}
+
+#[test]
+fn websocket_upgrade_requiring_two_factor_returns_401_json_not_redirect() {
+    let runtime = Runtime::new().expect("runtime should build");
+    runtime.block_on(async {
+        let (state, temp_dir) = two_factor_auth_test_state("ws-2fa-401", true).await;
+        let app: Router = Router::new()
+            .route("/ws/browser", get(protected_ok))
+            .route_layer(from_fn_with_state(state.clone(), require_readonly_auth))
+            .with_state(state);
+        let response = app
+            .oneshot(ws_upgrade_request(
+                "/ws/browser",
+                Some(TEST_BASIC_AUTH_HEADER),
+                SocketAddr::V4(SocketAddrV4::new(
+                    "198.51.100.24".parse().expect("ip"),
+                    51234,
+                )),
+            ))
+            .await
+            .expect("response should be produced");
+
+        // 浏览器 WS 握手无法跟随 302,因此必须是 401 + JSON,且不带 Location 头。
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(response.headers().get(header::LOCATION).is_none());
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body should read");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(json["ok"], serde_json::Value::Bool(false));
+        assert_eq!(json["message"], "two_factor_required");
+        assert_eq!(json["endpoint"], "/verify-2fa");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    });
+}
+
+#[test]
+fn http_request_requiring_two_factor_still_redirects() {
+    let runtime = Runtime::new().expect("runtime should build");
+    runtime.block_on(async {
+        let (state, temp_dir) = two_factor_auth_test_state("http-2fa-302", true).await;
+        let app: Router = Router::new()
+            .route("/api/overview", get(protected_ok))
+            .route_layer(from_fn_with_state(state.clone(), require_readonly_auth))
+            .with_state(state);
+        // 没有 Upgrade 头的普通 HTTP 请求:行为不变,仍是 302 → /verify-2fa。
+        let response = app
+            .oneshot(protected_request(
+                "GET",
+                "/api/overview",
+                Some(TEST_BASIC_AUTH_HEADER),
+                SocketAddr::V4(SocketAddrV4::new(
+                    "198.51.100.24".parse().expect("ip"),
+                    51234,
+                )),
+            ))
+            .await
+            .expect("response should be produced");
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .expect("location header"),
+            "/verify-2fa"
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    });
+}
+
+#[test]
+fn websocket_upgrade_without_two_factor_passes_through() {
+    let runtime = Runtime::new().expect("runtime should build");
+    runtime.block_on(async {
+        let (state, temp_dir) = two_factor_auth_test_state("ws-no-2fa-pass", false).await;
+        let app: Router = Router::new()
+            .route("/ws/browser", get(protected_ok))
+            .route_layer(from_fn_with_state(state.clone(), require_readonly_auth))
+            .with_state(state);
+        // 2FA 未开启时,带 Upgrade 头的请求应正常放行到 handler(不受 WS 检测影响)。
+        let response = app
+            .oneshot(ws_upgrade_request(
+                "/ws/browser",
+                Some(TEST_BASIC_AUTH_HEADER),
+                SocketAddr::V4(SocketAddrV4::new(
+                    "198.51.100.24".parse().expect("ip"),
+                    51234,
+                )),
+            ))
+            .await
+            .expect("response should be produced");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    });
+}
+
 #[test]
 fn readonly_auth_route_logs_missing_basic_auth_reason() {
     let runtime = Runtime::new().expect("runtime should build");
@@ -1468,6 +1592,25 @@ fn protected_request(
     peer_addr: SocketAddr,
 ) -> Request<Body> {
     let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(auth_header) = auth_header {
+        builder = builder.header(header::AUTHORIZATION, auth_header);
+    }
+    let mut request = builder.body(Body::empty()).expect("request should build");
+    request.extensions_mut().insert(ConnectInfo(peer_addr));
+    request
+}
+
+/// 构造一个带 `Upgrade: websocket` 头的 GET 请求,模拟浏览器 WebSocket 握手。
+fn ws_upgrade_request(
+    uri: &str,
+    auth_header: Option<&str>,
+    peer_addr: SocketAddr,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header(header::CONNECTION, "Upgrade")
+        .header(header::UPGRADE, "websocket");
     if let Some(auth_header) = auth_header {
         builder = builder.header(header::AUTHORIZATION, auth_header);
     }

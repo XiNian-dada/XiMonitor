@@ -111,6 +111,12 @@ pub(crate) async fn require_readonly_auth(
     if basic_authorized {
         clear_readonly_auth_failures(&state, &meta);
         if two_factor_enabled {
+            // WebSocket 升级握手无法跟随 302 重定向(浏览器 `new WebSocket()` 不暴露
+            // redirect),返回 401 + JSON。WS 客户端据此 fallback 到一次 `/api/bootstrap`
+            // 探测,由统一 api 客户端完成到 /verify-2fa 的真实跳转。
+            if is_websocket_upgrade(&headers) {
+                return websocket_two_factor_required_response();
+            }
             return issue_two_factor_redirect(&state).await;
         }
         return next.run(request).await;
@@ -389,6 +395,33 @@ fn clear_readonly_auth_failures(state: &AppState, meta: &ReadonlyAuthMeta) {
             .sensitive_readonly_auth_admission
             .clear_auth_failures(meta.client_ip);
     }
+}
+
+/// 判断请求是否为 WebSocket 升级握手。依据 `Upgrade` 头是否包含 `websocket`
+/// token(大小写不敏感、容忍逗号分隔),与 axum `WebSocketUpgrade` 的识别一致。
+fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("websocket"))
+        })
+}
+
+/// 受保护的 WebSocket 端点要求 2FA 时的响应。浏览器 `new WebSocket()` 无法跟随
+/// HTTP 302,因此返回 401 + JSON 而非重定向;WS 客户端据此跳转 /verify-2fa。
+fn websocket_two_factor_required_response() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({
+            "ok": false,
+            "message": "two_factor_required",
+            "endpoint": "/verify-2fa",
+        })),
+    )
+        .into_response()
 }
 
 async fn issue_two_factor_redirect(state: &AppState) -> Response {
