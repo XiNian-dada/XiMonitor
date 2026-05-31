@@ -6,6 +6,8 @@ import AlertOverviewCard from '@/components/AlertOverviewCard.vue';
 import SmtpChannelCard from '@/components/SmtpChannelCard.vue';
 import WebhookChannelCard from '@/components/WebhookChannelCard.vue';
 import InspectionCard from '@/components/InspectionCard.vue';
+import RuleList from '@/components/RuleList.vue';
+import PreviewCard from '@/components/PreviewCard.vue';
 import ReauthFields from '@/components/ReauthFields.vue';
 import SettingsMessage from '@/components/SettingsMessage.vue';
 import { ApiAbortError } from '@/api/client';
@@ -85,6 +87,9 @@ async function save(): Promise<void> {
           <WebhookChannelCard v-model="draft.webhook" />
           <InspectionCard v-model="draft.inspection" />
         </div>
+
+        <RuleList v-model="draft.rules" />
+        <PreviewCard :preview="store.preview" />
       </template>
 
       <SettingsMessage

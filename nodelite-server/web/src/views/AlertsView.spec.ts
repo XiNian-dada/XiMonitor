@@ -28,6 +28,9 @@ const FAKE_DICT = {
     'alerts.saved': 'Saved',
     'alerts.save_failed': 'Save failed: {error}',
     'alerts.secret.keep': 'leave blank to keep',
+    'alerts.rules.title': 'Alert Rules',
+    'alerts.rules.add': 'Add rule',
+    'alerts.preview.title': 'Preview',
     'settings.password.current': 'Current password',
     'settings.security.verification_code': 'Code',
     'common.waiting_for_data': 'Waiting…',
@@ -96,6 +99,9 @@ describe('AlertsView', () => {
     expect(wrapper.find('[data-test="smtp-host"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="webhook-url"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="inspection-lookback"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="rule-list"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="rule-card"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="preview-card"]').exists()).toBe(true);
   });
 
   it('shows an error message (not an infinite spinner) when the load fails', async () => {
