@@ -6,6 +6,7 @@
 import { api } from './client';
 import type {
   AgentLogEntry,
+  AlertSettingsResponse,
   BootstrapResponse,
   ChangePasswordRequest,
   DisableTwoFactorRequest,
@@ -19,10 +20,23 @@ import type {
   SettingsActionResponse,
   SettingsResponse,
   TwoFactorSetupResponse,
+  UpdateAlertSettingsRequest,
 } from './types';
 
 export type {
   AgentLogEntry,
+  AlertChannel,
+  AlertComparator,
+  AlertMetric,
+  AlertPreview,
+  AlertRuleView,
+  AlertScopeMode,
+  AlertSettingsResponse,
+  AlertSettingsView,
+  AlertSeverity,
+  AlertSmtpSettingsView,
+  AlertSmtpTransport,
+  AlertWebhookSettingsView,
   BootstrapResponse,
   ChangePasswordRequest,
   DisableTwoFactorRequest,
@@ -30,6 +44,9 @@ export type {
   EnableTwoFactorRequest,
   HistoryPoint,
   HistoryQuery,
+  InspectionHighlight,
+  InspectionPreview,
+  InspectionSettingsView,
   LogLevel,
   NodeIdentity,
   NodeListItem,
@@ -44,7 +61,13 @@ export type {
   SettingsAuth,
   SettingsResponse,
   SettingsUpdates,
+  TriggeredRulePreview,
   TwoFactorSetupResponse,
+  UpdateAlertRuleRequest,
+  UpdateAlertSettingsRequest,
+  UpdateAlertSmtpSettingsRequest,
+  UpdateAlertWebhookSettingsRequest,
+  UpdateInspectionSettingsRequest,
 } from './types';
 
 function postJson<T>(path: string, body: unknown): Promise<T> {
@@ -98,4 +121,9 @@ export const apiClient = {
     postJson<SettingsActionResponse>('/api/settings/2fa/disable', body),
   changePassword: (body: ChangePasswordRequest) =>
     postJson<SettingsActionResponse>('/api/settings/password', body),
+
+  // --- Alerts ---
+  alertSettings: () => api<AlertSettingsResponse>('/api/settings/alerts'),
+  updateAlertSettings: (body: UpdateAlertSettingsRequest) =>
+    postJson<AlertSettingsResponse>('/api/settings/alerts', body),
 };

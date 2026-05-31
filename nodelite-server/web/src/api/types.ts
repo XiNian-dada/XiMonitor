@@ -229,3 +229,172 @@ export interface ChangePasswordRequest {
   current_password: string;
   new_password: string;
 }
+
+// --- Alerts (handlers/settings/types.rs + nodelite-proto/config/alerts.rs) ---
+// All alert enums serialize snake_case (verified in config/alerts.rs).
+
+export type AlertChannel = 'smtp' | 'webhook';
+export type AlertSmtpTransport = 'start_tls' | 'tls' | 'plain';
+export type AlertMetric =
+  | 'cpu_usage_percent'
+  | 'memory_usage_percent'
+  | 'disk_usage_percent'
+  | 'latency_ms'
+  | 'offline_minutes';
+export type AlertComparator = 'gt' | 'lt';
+export type AlertSeverity = 'warning' | 'critical';
+export type AlertScopeMode = 'all' | 'node_ids' | 'tags';
+
+export interface AlertSmtpSettingsView {
+  enabled: boolean;
+  host: string;
+  port: number;
+  username: string;
+  sender: string;
+  recipients: string[];
+  transport: AlertSmtpTransport;
+  send_resolved: boolean;
+  /** Read-only: true if a password is stored. The secret is never echoed. */
+  password_configured: boolean;
+}
+
+export interface AlertWebhookSettingsView {
+  enabled: boolean;
+  url: string;
+  send_resolved: boolean;
+  /** Read-only: true if a secret is stored. The secret is never echoed. */
+  secret_configured: boolean;
+}
+
+export interface AlertRuleView {
+  id: string;
+  name: string;
+  enabled: boolean;
+  metric: AlertMetric;
+  comparator: AlertComparator;
+  threshold: number;
+  window_minutes: number;
+  severity: AlertSeverity;
+  scope_mode: AlertScopeMode;
+  node_ids: string[];
+  tags: string[];
+  delivery: AlertChannel[];
+  cooldown_minutes: number;
+  send_resolved: boolean;
+}
+
+export interface InspectionSettingsView {
+  enabled: boolean;
+  local_time: string;
+  lookback_hours: number;
+  delivery: AlertChannel[];
+  offline_grace_minutes: number;
+  latency_warn_ms: number;
+  cpu_warn_percent: number;
+  memory_warn_percent: number;
+}
+
+export interface AlertSettingsView {
+  enabled: boolean;
+  smtp: AlertSmtpSettingsView;
+  webhook: AlertWebhookSettingsView;
+  rules: AlertRuleView[];
+  inspection: InspectionSettingsView;
+}
+
+export interface TriggeredRulePreview {
+  rule_id: string;
+  rule_name: string;
+  severity: AlertSeverity;
+  node_ids: string[];
+}
+
+export interface InspectionHighlight {
+  node_id: string;
+  node_label: string;
+  reasons: string[];
+}
+
+export interface InspectionPreview {
+  total_nodes: number;
+  offline_nodes: number;
+  latency_nodes: number;
+  cpu_hot_nodes: number;
+  memory_hot_nodes: number;
+  highlights: InspectionHighlight[];
+}
+
+export interface AlertPreview {
+  generated_at: string;
+  triggered_rules: TriggeredRulePreview[];
+  inspection: InspectionPreview;
+}
+
+/** GET /api/settings/alerts — AlertSettingsResponse */
+export interface AlertSettingsResponse {
+  config: AlertSettingsView;
+  preview: AlertPreview;
+}
+
+// Update payloads (POST /api/settings/alerts). Secrets follow the server's
+// merge rule: clear_* wipes; else a non-empty value replaces; else keep.
+
+export interface UpdateAlertSmtpSettingsRequest {
+  enabled: boolean;
+  host: string;
+  port: number;
+  username: string;
+  password?: string;
+  clear_password: boolean;
+  sender: string;
+  recipients: string[];
+  transport: AlertSmtpTransport;
+  send_resolved: boolean;
+}
+
+export interface UpdateAlertWebhookSettingsRequest {
+  enabled: boolean;
+  url: string;
+  secret?: string;
+  clear_secret: boolean;
+  send_resolved: boolean;
+}
+
+export interface UpdateAlertRuleRequest {
+  id: string;
+  name: string;
+  enabled: boolean;
+  metric: AlertMetric;
+  comparator: AlertComparator;
+  threshold: number;
+  window_minutes: number;
+  severity: AlertSeverity;
+  scope_mode: AlertScopeMode;
+  node_ids: string[];
+  tags: string[];
+  delivery: AlertChannel[];
+  cooldown_minutes: number;
+  send_resolved: boolean;
+}
+
+export interface UpdateInspectionSettingsRequest {
+  enabled: boolean;
+  local_time: string;
+  lookback_hours: number;
+  delivery: AlertChannel[];
+  offline_grace_minutes: number;
+  latency_warn_ms: number;
+  cpu_warn_percent: number;
+  memory_warn_percent: number;
+}
+
+/** POST /api/settings/alerts — UpdateAlertSettingsRequest (carries reauth). */
+export interface UpdateAlertSettingsRequest {
+  current_password?: string;
+  code?: string;
+  enabled: boolean;
+  smtp: UpdateAlertSmtpSettingsRequest;
+  webhook: UpdateAlertWebhookSettingsRequest;
+  rules: UpdateAlertRuleRequest[];
+  inspection: UpdateInspectionSettingsRequest;
+}
