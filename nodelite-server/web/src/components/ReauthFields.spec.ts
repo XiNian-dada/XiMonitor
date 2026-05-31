@@ -11,7 +11,10 @@ const FAKE_DICT = {
 
 const Stub = defineComponent({ render: () => h('div') });
 
-function mountFields(props: Record<string, unknown>) {
+function mountFields(props: {
+  twoFactorEnabled: boolean;
+  variant?: 'server-update' | 'standard' | 'both';
+}) {
   return mount(ReauthFields, { props, global: { plugins: [getI18n()] } });
 }
 

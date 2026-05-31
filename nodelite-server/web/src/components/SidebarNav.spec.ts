@@ -28,6 +28,7 @@ function makeRouter(): Router {
     routes: [
       { path: '/', name: 'dashboard', component: Stub },
       { path: '/nodes/:id', name: 'node-detail', component: Stub },
+      { path: '/settings', name: 'settings', component: Stub },
     ],
   });
 }
@@ -73,13 +74,24 @@ describe('SidebarNav', () => {
     expect(wrapper.find('[data-test="nav-overview"]').classes()).toContain('active');
   });
 
-  it('disables the Stage 2.5 buttons', async () => {
+  it('links Settings and marks it active on /settings', async () => {
+    const router = makeRouter();
+    await router.push('/settings');
+    await router.isReady();
+    const wrapper = mount(SidebarNav, { global: { plugins: [router, getI18n()] } });
+
+    const settings = wrapper.find('[data-test="nav-settings"]');
+    expect(settings.attributes('disabled')).toBeUndefined();
+    expect(settings.classes()).toContain('active');
+  });
+
+  it('still disables the not-yet-built buttons (alerts/account)', async () => {
     const router = makeRouter();
     await router.push('/');
     await router.isReady();
     const wrapper = mount(SidebarNav, { global: { plugins: [router, getI18n()] } });
 
-    for (const tab of ['nav-settings', 'nav-alerts', 'nav-account']) {
+    for (const tab of ['nav-alerts', 'nav-account']) {
       const el = wrapper.find(`[data-test="${tab}"]`);
       expect(el.attributes('disabled')).toBeDefined();
     }

@@ -11,6 +11,11 @@ const routes: RouteRecordRaw[] = [
     name: 'node-detail',
     component: () => import('@/views/NodeDetailView.vue'),
   },
+  {
+    path: '/settings',
+    name: 'settings',
+    component: () => import('@/views/SettingsView.vue'),
+  },
 ];
 
 export const router = createRouter({
