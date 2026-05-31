@@ -15,8 +15,10 @@ import type {
   HistoryQuery,
   NodeListItem,
   NodeStatus,
+  NodeTokenRefreshResponse,
   OverviewData,
   ReauthPayload,
+  RefreshNodeTokenRequest,
   SettingsActionResponse,
   SettingsResponse,
   TwoFactorSetupResponse,
@@ -54,8 +56,10 @@ export type {
   NodeListSnapshot,
   NodeSnapshot,
   NodeStatus,
+  NodeTokenRefreshResponse,
   OverviewData,
   ReauthPayload,
+  RefreshNodeTokenRequest,
   SettingsActionResponse,
   SettingsAgentToken,
   SettingsAuth,
@@ -126,4 +130,8 @@ export const apiClient = {
   alertSettings: () => api<AlertSettingsResponse>('/api/settings/alerts'),
   updateAlertSettings: (body: UpdateAlertSettingsRequest) =>
     postJson<AlertSettingsResponse>('/api/settings/alerts', body),
+
+  // --- Per-node token refresh ---
+  refreshNodeToken: (id: string, body: RefreshNodeTokenRequest) =>
+    postJson<NodeTokenRefreshResponse>(`/api/nodes/${encodeURIComponent(id)}/refresh-token`, body),
 };

@@ -160,12 +160,11 @@ describe('NodeDetailView', () => {
     expect(wrapper.find('[data-test="node-meta"]').text()).toContain('eu');
   });
 
-  it('renders the five tabs with settings disabled', async () => {
+  it('renders the six tabs including settings', async () => {
     const { wrapper } = await mountDetail();
-    for (const tab of ['overview', 'monitor', 'network', 'hardware', 'logs']) {
+    for (const tab of ['overview', 'monitor', 'network', 'hardware', 'logs', 'settings']) {
       expect(wrapper.find(`[data-test="tab-${tab}"]`).exists()).toBe(true);
     }
-    expect(wrapper.find('[data-test="tab-settings"]').attributes('disabled')).toBeDefined();
   });
 
   it('defaults to the overview tab and switches via the URL hash', async () => {

@@ -10,6 +10,7 @@ import MetricChart from '@/components/MetricChart.vue';
 import MonitorCharts, { type MonitorMetric } from '@/components/MonitorCharts.vue';
 import ChartModal from '@/components/ChartModal.vue';
 import LogPanel from '@/components/LogPanel.vue';
+import NodeSettingsPanel from '@/components/NodeSettingsPanel.vue';
 import { usePolling } from '@/composables/usePolling';
 import { useChartSelection, type PresetKey } from '@/composables/useChartSelection';
 import { nodeStatusKey } from '@/lib/map/projection';
@@ -26,9 +27,7 @@ import { useNodeLogsStore } from '@/stores/nodeLogs';
 
 const NODE_DETAIL_REFRESH_MS = 5000;
 
-// Tabs the shell renders. `settings` is deferred (Stage 2.5) and rendered
-// disabled, mirroring the dashboard sidebar pattern.
-const TABS = ['overview', 'monitor', 'network', 'hardware', 'logs'] as const;
+const TABS = ['overview', 'monitor', 'network', 'hardware', 'logs', 'settings'] as const;
 type TabId = (typeof TABS)[number];
 
 function isTabId(value: string): value is TabId {
@@ -196,15 +195,6 @@ const modalConfig = computed(() => {
         >
           {{ $t(`node.tabs.${tab}`) }}
         </button>
-        <button
-          type="button"
-          class="tab-button"
-          disabled
-          :title="`${$t('node.tabs.settings')} (Stage 2.5)`"
-          data-test="tab-settings"
-        >
-          {{ $t('node.tabs.settings') }}
-        </button>
       </nav>
 
       <section class="tab-pane" :data-pane="activeTab" data-test="node-tab-pane">
@@ -261,6 +251,8 @@ const modalConfig = computed(() => {
           :entries="logsStore.entries"
           :error="logsStore.error"
         />
+
+        <NodeSettingsPanel v-else-if="activeTab === 'settings'" :node-id="nodeId" />
       </section>
     </div>
 

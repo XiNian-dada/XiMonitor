@@ -82,6 +82,16 @@ export function tokenRemaining(seconds: number | null | undefined): DurationResu
   return { kind: 'minutes', minutes: Math.max(1, Math.floor(value / 60)) };
 }
 
+/**
+ * Format an ISO 8601 timestamp to a localized date-time string. Used by
+ * LogPanel and TokenTable (inline copies) and now NodeSettingsPanel. Returns
+ * the raw string if parsing fails.
+ */
+export function fmtDateTime(value: string, locale = 'en'): string {
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toLocaleString(locale) : value;
+}
+
 /** Token-row severity class from remaining seconds (expired / <7d / ok). */
 export function tokenSeverity(seconds: number | null | undefined): '' | 'expired' | 'expiring' | 'ok' {
   if (seconds == null || !Number.isFinite(Number(seconds))) return '';

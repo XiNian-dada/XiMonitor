@@ -398,3 +398,17 @@ export interface UpdateAlertSettingsRequest {
   rules: UpdateAlertRuleRequest[];
   inspection: UpdateInspectionSettingsRequest;
 }
+
+/** POST /api/nodes/{id}/refresh-token — NodeTokenRefreshResponse */
+export interface NodeTokenRefreshResponse {
+  ok: boolean;
+  message: string;
+  token_expires_at: string | null;
+  token_expires_in_secs: number | null;
+}
+
+/** POST /api/nodes/{id}/refresh-token — request body (carries reauth). */
+export interface RefreshNodeTokenRequest {
+  current_password?: string;
+  code?: string;
+}
