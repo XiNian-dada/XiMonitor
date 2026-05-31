@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue';
+import { computed, reactive, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import type { SettingsResponse } from '@/api';
 import { apiClient } from '@/api';
@@ -12,14 +12,14 @@ import SettingsMessage from './SettingsMessage.vue';
 const props = defineProps<{ settings: SettingsResponse }>();
 const { t } = useI18n();
 
-const twoFactor = () => props.settings.auth.two_factor_enabled;
+const twoFactor = computed(() => props.settings.auth.two_factor_enabled);
 
 // --- Check for update (direct GitHub call) ---
 const checkMsg = reactive<{ state: 'ok' | 'error' | null; text: string }>({ state: null, text: '' });
 const checking = ref(false);
 
 function githubLatestUrl(): string | null {
-  const repo = props.settings.repository;
+  const repo = props.settings.repository.replace(/\/+$/, '');
   if (!repo.startsWith('https://github.com/')) return null;
   return `${repo.replace('https://github.com/', 'https://api.github.com/repos/')}/releases/latest`;
 }
@@ -60,7 +60,9 @@ async function submitUpdate(): Promise<void> {
   updateMsg.state = null;
   updateMsg.text = t('settings.version.update_starting');
   // server-update reauth: 2FA → code only; else current_password only.
-  const payload = twoFactor() ? { code: reauth.code } : { current_password: reauth.currentPassword };
+  const payload = twoFactor.value
+    ? { code: reauth.code }
+    : { current_password: reauth.currentPassword };
   try {
     const res = await apiClient.updateServer(payload);
     updateMsg.state = res.ok ? 'ok' : 'error';
@@ -105,12 +107,12 @@ async function submitUpdate(): Promise<void> {
 
     <form class="update-form" data-test="server-update-form" @submit.prevent="submitUpdate">
       <p class="note">
-        {{ twoFactor() ? t('settings.version.manual_update_note_2fa') : t('settings.version.manual_update_note_password') }}
+        {{ twoFactor ? t('settings.version.manual_update_note_2fa') : t('settings.version.manual_update_note_password') }}
       </p>
       <ReauthFields
         v-model:current-password="reauth.currentPassword"
         v-model:code="reauth.code"
-        :two-factor-enabled="twoFactor()"
+        :two-factor-enabled="twoFactor"
         variant="server-update"
       />
       <button type="submit" class="btn btn--primary" :disabled="updating" data-test="server-update-submit">

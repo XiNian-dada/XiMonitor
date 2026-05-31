@@ -101,7 +101,7 @@ describe('SettingsView', () => {
     vi.clearAllMocks();
   });
 
-  it('loads settings on mount and renders the three cards', async () => {
+  async function mountView() {
     const pinia = createPinia();
     setActivePinia(pinia);
     const router = makeRouter();
@@ -109,11 +109,25 @@ describe('SettingsView', () => {
     await router.isReady();
     const wrapper = mount(SettingsView, { global: { plugins: [pinia, router, getI18n()] } });
     await flushPromises();
+    return wrapper;
+  }
 
+  it('loads settings on mount and renders the three cards', async () => {
+    const wrapper = await mountView();
     expect(mockSettings).toHaveBeenCalled();
     expect(wrapper.find('[data-test="settings-view"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="server-update-card"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="ops-card"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="token-table"]').exists()).toBe(true);
+  });
+
+  it('shows an error message (not an infinite spinner) when the load fails', async () => {
+    const { ApiError } = await import('@/api/client');
+    mockSettings.mockReset();
+    mockSettings.mockRejectedValueOnce(new ApiError(503, 'service unavailable'));
+    const wrapper = await mountView();
+    expect(wrapper.find('[data-test="settings-loading"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="server-update-card"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="settings-error"]').exists()).toBe(true);
   });
 });

@@ -1,23 +1,24 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import type { SettingsResponse } from '@/api';
 
 const props = defineProps<{ settings: SettingsResponse }>();
 const { t } = useI18n();
 
-const rows = () => [
+const rows = computed(() => [
   { label: t('settings.ops.config'), value: props.settings.config_path },
   { label: t('settings.ops.registry'), value: props.settings.registry_path },
   { label: t('settings.ops.history'), value: props.settings.history_db_path },
   { label: t('settings.ops.snapshot'), value: props.settings.snapshot_path },
-];
+]);
 </script>
 
 <template>
   <article class="panel" data-test="ops-card">
     <h2 class="card-title">{{ t('settings.ops.title') }}</h2>
     <div class="kv">
-      <template v-for="row in rows()" :key="row.label">
+      <template v-for="row in rows" :key="row.label">
         <span class="kv__label">{{ row.label }}</span>
         <span class="kv__value">{{ row.value }}</span>
       </template>

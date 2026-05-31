@@ -5,6 +5,7 @@ import AppLayout from '@/components/AppLayout.vue';
 import ServerUpdateCard from '@/components/ServerUpdateCard.vue';
 import OpsCard from '@/components/OpsCard.vue';
 import TokenTable from '@/components/TokenTable.vue';
+import SettingsMessage from '@/components/SettingsMessage.vue';
 import { useSettingsStore } from '@/stores/settings';
 
 const { t } = useI18n();
@@ -23,16 +24,22 @@ onMounted(() => {
     </template>
 
     <section class="settings" data-test="settings-view">
-      <p v-if="!store.data" class="placeholder" data-test="settings-loading">
-        {{ t('common.waiting_for_data') }}
-      </p>
-      <template v-else>
+      <template v-if="store.data">
         <div class="settings__grid">
           <ServerUpdateCard :settings="store.data" />
           <OpsCard :settings="store.data" />
         </div>
         <TokenTable :agents="store.data.agents" />
       </template>
+      <SettingsMessage
+        v-else-if="store.error"
+        state="error"
+        :text="store.error.message"
+        data-test="settings-error"
+      />
+      <p v-else class="placeholder" data-test="settings-loading">
+        {{ t('common.waiting_for_data') }}
+      </p>
     </section>
   </AppLayout>
 </template>

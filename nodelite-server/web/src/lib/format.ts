@@ -84,7 +84,7 @@ export function tokenRemaining(seconds: number | null | undefined): DurationResu
 
 /** Token-row severity class from remaining seconds (expired / <7d / ok). */
 export function tokenSeverity(seconds: number | null | undefined): '' | 'expired' | 'expiring' | 'ok' {
-  if (seconds == null) return '';
+  if (seconds == null || !Number.isFinite(Number(seconds))) return '';
   if (seconds <= 0) return 'expired';
   return seconds < 7 * 86400 ? 'expiring' : 'ok';
 }

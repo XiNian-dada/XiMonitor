@@ -27,7 +27,7 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  /** Load once; pages call this on mount. Re-fetches even if data exists. */
+  /** Alias for refresh(); pages call this on mount for readability. */
   async function load(): Promise<void> {
     await refresh();
   }
