@@ -76,6 +76,10 @@ const ip = computed(() => (node.value ? ipFromNode(node.value) : null));
 const location = computed(() => (node.value ? locationFromNode(node.value) : null));
 const uptime = computed(() => uptimeParts(node.value?.snapshot?.uptime_secs));
 
+// Render not-found state when the API returned an error and we have no data.
+// A missing node returns 404, which sets store.error but leaves store.data null.
+const notFound = computed(() => store.error !== null && store.data === null);
+
 // Tabs that render the overview-history charts (overview/network).
 const historyNeeded = computed(
   () => activeTab.value === 'overview' || activeTab.value === 'network',
@@ -183,21 +187,34 @@ const modalConfig = computed(() => {
     </template>
 
     <div class="node-detail">
-      <nav class="tabs" data-test="node-tabs">
-        <button
-          v-for="tab in TABS"
-          :key="tab"
-          type="button"
-          class="tab-button"
-          :class="{ active: activeTab === tab }"
-          :data-test="`tab-${tab}`"
-          @click="selectTab(tab)"
-        >
-          {{ $t(`node.tabs.${tab}`) }}
-        </button>
-      </nav>
+      <!-- Not-found state: API returned an error and we have no data -->
+      <div v-if="notFound" class="error-state" data-test="node-not-found">
+        <div class="error-state__icon">⚠️</div>
+        <h2 class="error-state__title">{{ $t('node.not_found.title') }}</h2>
+        <p class="error-state__message">
+          {{ $t('node.not_found.message', { nodeId: nodeId }) }}
+        </p>
+        <RouterLink to="/" class="error-state__link">
+          {{ $t('node.not_found.back_to_dashboard') }}
+        </RouterLink>
+      </div>
 
-      <section class="tab-pane" :data-pane="activeTab" data-test="node-tab-pane">
+      <template v-else>
+        <nav class="tabs" data-test="node-tabs">
+          <button
+            v-for="tab in TABS"
+            :key="tab"
+            type="button"
+            class="tab-button"
+            :class="{ active: activeTab === tab }"
+            :data-test="`tab-${tab}`"
+            @click="selectTab(tab)"
+          >
+            {{ $t(`node.tabs.${tab}`) }}
+          </button>
+        </nav>
+
+        <section class="tab-pane" :data-pane="activeTab" data-test="node-tab-pane">
         <template v-if="activeTab === 'overview'">
           <div class="overview-grid">
             <NodeInfoPanel :node="node" />
@@ -254,6 +271,7 @@ const modalConfig = computed(() => {
 
         <NodeSettingsPanel v-else-if="activeTab === 'settings'" :node-id="nodeId" />
       </section>
+      </template>
     </div>
 
     <ChartModal v-if="modalConfig" v-bind="modalConfig" @close="closeZoom" />
@@ -381,6 +399,48 @@ const modalConfig = computed(() => {
 .net-stat small {
   color: var(--text-muted);
   font-size: 12px;
+}
+.error-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 80px 20px;
+  text-align: center;
+  min-height: 400px;
+}
+.error-state__icon {
+  font-size: 64px;
+  margin-bottom: 20px;
+  opacity: 0.6;
+}
+.error-state__title {
+  margin: 0 0 12px;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.error-state__message {
+  margin: 0 0 24px;
+  font-size: 14px;
+  color: var(--text-muted);
+  max-width: 400px;
+}
+.error-state__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px;
+  background: var(--accent-blue);
+  color: white;
+  border-radius: 8px;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+  transition: opacity 0.2s;
+}
+.error-state__link:hover {
+  opacity: 0.9;
 }
 @media (max-width: 880px) {
   .overview-grid {

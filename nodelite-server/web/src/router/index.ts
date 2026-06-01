@@ -31,4 +31,16 @@ const routes: RouteRecordRaw[] = [
 export const router = createRouter({
   history: createWebHistory(),
   routes,
+  scrollBehavior(to, _from, savedPosition) {
+    // Restore saved position when using browser back/forward
+    if (savedPosition) {
+      return savedPosition;
+    }
+    // Scroll to anchor if present
+    if (to.hash) {
+      return { el: to.hash, behavior: 'smooth' };
+    }
+    // Default: scroll to top on route change
+    return { top: 0 };
+  },
 });

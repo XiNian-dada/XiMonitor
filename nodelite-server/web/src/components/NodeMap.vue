@@ -139,7 +139,7 @@ watch([geojson, theme], repaint);
 .map-stage {
   position: relative;
   aspect-ratio: 16 / 8;
-  min-height: 280px;
+  min-height: clamp(200px, 40vw, 280px);
   background:
     radial-gradient(circle at 20% 30%, rgba(59, 130, 246, 0.09), transparent 55%),
     radial-gradient(circle at 78% 62%, rgba(34, 197, 94, 0.06), transparent 52%),
