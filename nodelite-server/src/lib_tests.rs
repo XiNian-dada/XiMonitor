@@ -319,7 +319,7 @@ fn router_compresses_text_assets_but_not_webp() {
             .expect("state fixture should build");
         let app = crate::startup::build_router(state.clone());
 
-        for path in ["/", "/metrics"] {
+        for path in ["/", "/assets/ui-i18n.json", "/metrics"] {
             let response = app
                 .clone()
                 .oneshot(
@@ -485,13 +485,21 @@ fn public_auth_routes_attach_security_headers() {
             .await
             .expect("response should be produced");
         assert_eq!(verify_response.status(), StatusCode::OK);
-        assert_eq!(
-            verify_response
-                .headers()
-                .get(header::CONTENT_SECURITY_POLICY),
-            Some(&header::HeaderValue::from_static(
-                crate::startup::PROTECTED_CONTENT_SECURITY_POLICY,
-            )),
+        // The standalone 2FA page carries inline <script>/<style>, so it serves a
+        // page-specific CSP that pins them by sha256 (not the generic protected CSP).
+        let verify_csp = verify_response
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .expect("verify-2fa should set a CSP")
+            .to_str()
+            .expect("CSP should be valid ascii");
+        assert!(
+            verify_csp.contains("script-src 'self' 'sha256-"),
+            "verify-2fa CSP should pin its inline script: {verify_csp}"
+        );
+        assert!(
+            verify_csp.contains("style-src 'self' 'unsafe-inline'"),
+            "verify-2fa CSP should allow its inline styles: {verify_csp}"
         );
         assert_security_headers(verify_response.headers());
 

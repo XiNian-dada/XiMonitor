@@ -18,7 +18,7 @@ pub(crate) async fn static_asset(AxumPath(path): AxumPath<String>) -> Response {
     web_assets::static_asset(&path)
 }
 
-/// 2FA 验证页面 — 返回 verify-2fa.html (独立 Vite entry)
+/// 2FA 验证页面 — 独立后端页面(非 SPA 路由),带按 sha256 锁定内联脚本的专用 CSP。
 pub(crate) async fn verify_2fa_page() -> Response {
-    web_assets::static_asset("verify-2fa.html")
+    web_assets::verify_2fa_page()
 }
