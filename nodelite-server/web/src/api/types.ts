@@ -439,9 +439,4 @@ export type BrowserMessage =
       node_id: string;
     }
   | { type: 'ping' }
-  | { type: 'pong' }
-  | {
-      type: 'server_notice';
-      level: 'info' | 'warn' | 'error';
-      message: string;
-    };
+  | { type: 'pong' };

@@ -138,15 +138,30 @@ export class WsClient {
       return;
     }
 
+    // Don't reconnect if tab is hidden — visibility handler will resume on show
+    if (typeof document !== 'undefined' && document.hidden) {
+      this.setState({ kind: 'idle' });
+      return;
+    }
+
     this.scheduleReconnect();
   }
 
   private probeAuthState(): void {
-    fetch('/api/bootstrap')
+    fetch('/api/bootstrap', {
+      credentials: 'same-origin',
+      redirect: 'follow',
+    })
       .then((res) => {
-        if (res.status === 401 || res.status === 302) {
-          console.warn('Auth probe detected auth failure, navigating to re-auth');
-          window.location.href = res.status === 302 ? '/verify-2fa' : '/logout-and-reauth';
+        // fetch() follows 302 redirects, so check res.redirected + pathname
+        if (res.redirected && new URL(res.url).pathname === '/verify-2fa') {
+          console.warn('Auth probe detected 2FA required, navigating to verify-2fa');
+          window.location.href = '/verify-2fa';
+          return;
+        }
+        if (res.status === 401) {
+          console.warn('Auth probe detected 401, navigating to logout-and-reauth');
+          window.location.href = '/logout-and-reauth';
         }
       })
       .catch((err) => {
@@ -229,6 +244,7 @@ export class WsClient {
         console.log('Tab visible, reconnecting');
         this.clearReconnectTimer();
         this.handshakeFailures = 0;
+        this.reconnectAttempt = 0;
         this.connect();
       }
     }

@@ -111,15 +111,17 @@ describe('useNodesStore', () => {
       expect(store.nodes).toEqual([b]);
     });
 
-    it('rejects stale applyServerState', () => {
+    it('applyServerState always accepts (no guard)', () => {
       const store = useNodesStore();
       const a = makeNode({ identity: { node_id: 'a', node_label: 'A', hostname: 'a', tags: [] } });
       const b = makeNode({ identity: { node_id: 'b', node_label: 'B', hostname: 'b', tags: [] } });
 
       store.applyServerState([a], '2026-06-01T12:01:00Z');
+      // Even with older timestamp, InitialState is always accepted
       store.applyServerState([b], '2026-06-01T12:00:00Z');
 
-      expect(store.nodes).toEqual([a]);
+      expect(store.nodes).toEqual([b]);
+      expect(store.lastGeneratedAt).toBe('2026-06-01T12:00:00Z');
     });
 
     it('rejects stale upsertNode', () => {

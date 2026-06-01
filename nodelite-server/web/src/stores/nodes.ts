@@ -30,7 +30,9 @@ export const useNodesStore = defineStore('nodes', () => {
     error.value = null;
     try {
       const result = await apiClient.listNodes();
-      applyServerState(result, new Date().toISOString());
+      // Use current server-side baseline if available, else fall back to client clock
+      const timestamp = lastGeneratedAt.value || new Date().toISOString();
+      applyServerState(result, timestamp);
     } catch (e) {
       if (e instanceof ApiAbortError) return;
       error.value = e instanceof Error ? e : new Error(String(e));
@@ -39,9 +41,8 @@ export const useNodesStore = defineStore('nodes', () => {
     }
   }
 
-  // From WS InitialState (full replacement)
+  // From WS InitialState (full replacement) — always accept, no guard
   function applyServerState(items: NodeListItem[], generatedAt: string): void {
-    if (lastGeneratedAt.value && generatedAt < lastGeneratedAt.value) return;
     const next = new Map<string, NodeListItem>();
     for (const item of items) next.set(item.identity.node_id, item);
     nodesById.value = next;
@@ -50,14 +51,14 @@ export const useNodesStore = defineStore('nodes', () => {
 
   // From WS NodeUpsert
   function upsertNode(node: NodeListItem, generatedAt: string): void {
-    if (lastGeneratedAt.value && generatedAt < lastGeneratedAt.value) return;
+    if (lastGeneratedAt.value && Date.parse(generatedAt) < Date.parse(lastGeneratedAt.value)) return;
     nodesById.value.set(node.identity.node_id, node);
     lastGeneratedAt.value = generatedAt;
   }
 
   // From WS NodeRemoved
   function removeNode(nodeId: string, generatedAt: string): void {
-    if (lastGeneratedAt.value && generatedAt < lastGeneratedAt.value) return;
+    if (lastGeneratedAt.value && Date.parse(generatedAt) < Date.parse(lastGeneratedAt.value)) return;
     nodesById.value.delete(nodeId);
     lastGeneratedAt.value = generatedAt;
   }

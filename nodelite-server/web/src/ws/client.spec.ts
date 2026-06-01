@@ -380,7 +380,7 @@ describe('WsClient', () => {
   });
 
   describe('visibility handling', () => {
-    it('closes connection when tab becomes hidden', async () => {
+    it('closes connection and stays idle when tab becomes hidden', async () => {
       server = new WS('ws://localhost:1234/ws/browser');
       client = new WsClient('ws://localhost:1234/ws/browser');
 
@@ -397,7 +397,7 @@ describe('WsClient', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      expect(client.getState().kind).toBe('reconnecting');
+      expect(client.getState().kind).toBe('idle');
     });
 
     it('reconnects when tab becomes visible after being hidden', async () => {
@@ -491,17 +491,22 @@ describe('WsClient', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      expect(fetchSpy).toHaveBeenCalledWith('/api/bootstrap');
+      expect(fetchSpy).toHaveBeenCalledWith('/api/bootstrap', {
+        credentials: 'same-origin',
+        redirect: 'follow',
+      });
     });
 
-    it('navigates to /verify-2fa on 302 response', async () => {
+    it('navigates to /verify-2fa on redirected response', async () => {
       const originalLocation = window.location.href;
       delete (window as { location?: unknown }).location;
       window.location = { href: originalLocation } as Location;
 
       fetchSpy.mockResolvedValue({
-        status: 302,
-        ok: false,
+        status: 200,
+        ok: true,
+        redirected: true,
+        url: 'http://localhost/verify-2fa',
       } as Response);
 
       client = new WsClient('ws://localhost:1234/ws/browser');

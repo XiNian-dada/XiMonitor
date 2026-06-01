@@ -22,7 +22,9 @@ export const useOverviewStore = defineStore('overview', () => {
     error.value = null;
     try {
       const result = await apiClient.overview();
-      apply(result, new Date().toISOString());
+      // Use current server-side baseline if available, else fall back to client clock
+      const timestamp = lastGeneratedAt.value || new Date().toISOString();
+      apply(result, timestamp);
     } catch (e) {
       if (e instanceof ApiAbortError) return;
       error.value = e instanceof Error ? e : new Error(String(e));
@@ -33,7 +35,7 @@ export const useOverviewStore = defineStore('overview', () => {
 
   // From WS InitialState or OverviewUpdate
   function apply(overview: OverviewData, generatedAt: string): void {
-    if (lastGeneratedAt.value && generatedAt < lastGeneratedAt.value) return;
+    if (lastGeneratedAt.value && Date.parse(generatedAt) < Date.parse(lastGeneratedAt.value)) return;
     data.value = overview;
     lastGeneratedAt.value = generatedAt;
   }
