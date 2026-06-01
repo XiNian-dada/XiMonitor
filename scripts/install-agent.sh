@@ -47,7 +47,15 @@ INSTALL_TOKEN_FILE="${NODELITE_AGENT_INSTALL_TOKEN_FILE:-}"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/nodelite"
 MODE="${NODELITE_AGENT_MODE:-auto}"
-BASE_URL="${NODELITE_AGENT_BASE_URL:-https://github.com/XiNian-dada/NodeLite/releases/latest/download}"
+# VERSION 环境变量支持安装指定版本（包括 alpha/beta 等预发布版本）
+# 例如: VERSION=v2.3.0-alpha.1 ./install-agent.sh
+# 留空则使用 latest
+VERSION="${NODELITE_AGENT_VERSION:-}"
+if [ -n "$VERSION" ]; then
+  BASE_URL="${NODELITE_AGENT_BASE_URL:-https://github.com/XiNian-dada/NodeLite/releases/download/${VERSION}}"
+else
+  BASE_URL="${NODELITE_AGENT_BASE_URL:-https://github.com/XiNian-dada/NodeLite/releases/latest/download}"
+fi
 CHECKSUMS_URL="${NODELITE_AGENT_CHECKSUMS_URL:-}"
 BINARY_URL="${NODELITE_AGENT_BINARY_URL:-}"
 SHA256_X86_64="${NODELITE_AGENT_SHA256_X86_64:-}"
@@ -225,6 +233,10 @@ fetch_expected_sha256() {
 
 # 把 `releases/latest/download` 形式的下载源解析成具体 tag,避免每次升级又跳到最新版。
 resolve_release_base_url() {
+  if [ -n "$VERSION" ]; then
+    printf '%s\n' "Installing specified version: $VERSION"
+    return 0
+  fi
   case "$BASE_URL" in
     https://github.com/*/releases/latest/download)
       releases_root="${BASE_URL%/latest/download}"

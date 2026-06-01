@@ -13,7 +13,15 @@ set -eu
 # 默认 umask:确保临时文件不会泄漏给同主机其它用户。
 umask 077
 
-BASE_URL="${NODELITE_SERVER_BASE_URL:-https://github.com/XiNian-dada/NodeLite/releases/latest/download}"
+# VERSION 环境变量支持安装指定版本（包括 alpha/beta 等预发布版本）
+# 例如: VERSION=v2.3.0-alpha.1 ./install-server.sh
+# 留空则使用 latest
+VERSION="${NODELITE_SERVER_VERSION:-}"
+if [ -n "$VERSION" ]; then
+  BASE_URL="${NODELITE_SERVER_BASE_URL:-https://github.com/XiNian-dada/NodeLite/releases/download/${VERSION}}"
+else
+  BASE_URL="${NODELITE_SERVER_BASE_URL:-https://github.com/XiNian-dada/NodeLite/releases/latest/download}"
+fi
 INSTALL_ROOT_DEFAULT="/opt/nodelite"
 LISTEN_HOST_DEFAULT="127.0.0.1"
 SERVICE_NAME="nodelite-server"
@@ -235,7 +243,12 @@ fetch_expected_sha256() {
 }
 
 # 把 `releases/latest/download` 解析为具体 tag,固化本次安装版本。
+# 如果用户通过 VERSION 环境变量指定了版本，则跳过解析直接使用。
 resolve_release_base_url() {
+  if [ -n "$VERSION" ]; then
+    printf '%s\n' "Installing specified version: $VERSION"
+    return 0
+  fi
   case "$BASE_URL" in
     https://github.com/*/releases/latest/download)
       releases_root="${BASE_URL%/latest/download}"
