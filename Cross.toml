@@ -1,4 +1,9 @@
 [build.env]
 # Allow release workflows to inject the tag version into builds running inside
 # cross containers, so runtime-reported versions stay aligned with Git tags.
-passthrough = ["NODELITE_BUILD_VERSION"]
+#
+# NODELITE_SKIP_WEB_BUILD lets build.rs reuse the prebuilt web/dist instead of
+# invoking pnpm: cross runs cargo inside a Docker image that has no pnpm, and
+# CI sets this var on the host — but cross does not forward host env into the
+# container unless it is listed here.
+passthrough = ["NODELITE_BUILD_VERSION", "NODELITE_SKIP_WEB_BUILD"]
