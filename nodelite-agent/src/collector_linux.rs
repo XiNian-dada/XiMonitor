@@ -21,28 +21,45 @@ use super::shared::{
 
 /// 采集器状态:为了计算 CPU/网络的"差分速率",需要保留上一次的采样值。
 pub struct HostCollector {
+    sys_root: std::path::PathBuf,
     previous_cpu: Option<CpuSample>,
     previous_network: Option<NetworkSample>,
 }
 
 pub fn new_collector() -> HostCollector {
     HostCollector {
+        sys_root: std::path::PathBuf::from("/"),
         previous_cpu: None,
         previous_network: None,
     }
 }
 
 impl HostCollector {
+    #[cfg(test)]
+    pub fn new_with_root(sys_root: std::path::PathBuf) -> Self {
+        Self {
+            sys_root,
+            previous_cpu: None,
+            previous_network: None,
+        }
+    }
+
     /// 组装节点身份。`agent_version` 来源于编译期注入,运行期固定不变。
     pub fn collect_identity(
         &self,
         config: &AgentConfig,
         agent_version: &str,
     ) -> Result<NodeIdentity> {
-        let uptime_secs = read_uptime("/proc/uptime")?;
+        let uptime_path = self.sys_root.join("proc/uptime");
+        let uptime_secs = read_uptime(&uptime_path)?;
         // 由当前时刻反推启动时间,在 i64 转换溢出时退化为 i64::MAX 防止 panic。
         let boot_time =
             Utc::now() - Duration::seconds(i64::try_from(uptime_secs).unwrap_or(i64::MAX));
+
+        let hostname_path = self.sys_root.join("proc/sys/kernel/hostname");
+        let os_release_path = self.sys_root.join("etc/os-release");
+        let osrelease_path = self.sys_root.join("proc/sys/kernel/osrelease");
+        let cpuinfo_path = self.sys_root.join("proc/cpuinfo");
 
         Ok(NodeIdentity {
             node_id: config.node_id.clone(),
@@ -50,11 +67,11 @@ impl HostCollector {
             hostname: config
                 .hostname_override
                 .clone()
-                .unwrap_or(read_hostname("/proc/sys/kernel/hostname")?),
-            os: read_os_name("/etc/os-release").unwrap_or_else(|_| "linux".to_string()),
-            kernel_version: read_trimmed("/proc/sys/kernel/osrelease").ok(),
-            cpu_model: read_cpu_model("/proc/cpuinfo").ok(),
-            cpu_cores: count_cpu_cores("/proc/cpuinfo").unwrap_or(1),
+                .unwrap_or(read_hostname(&hostname_path)?),
+            os: read_os_name(&os_release_path).unwrap_or_else(|_| "linux".to_string()),
+            kernel_version: read_trimmed(&osrelease_path).ok(),
+            cpu_model: read_cpu_model(&cpuinfo_path).ok(),
+            cpu_cores: count_cpu_cores(&cpuinfo_path).unwrap_or(1),
             agent_version: agent_version.to_string(),
             boot_time: Some(boot_time),
             tags: config.tags.clone(),
@@ -66,15 +83,17 @@ impl HostCollector {
     /// 首次调用时由于没有"上一次"的数据,`cpu_usage_percent` 与网络速率
     /// 都会返回 `None`,这是符合预期的初始状态。
     pub fn collect_snapshot(&mut self) -> Result<NodeSnapshot> {
+        let stat_path = self.sys_root.join("proc/stat");
         let cpu_sample =
-            parse_cpu_sample(&fs::read_to_string("/proc/stat").context("read /proc/stat")?)?;
+            parse_cpu_sample(&fs::read_to_string(&stat_path).context("read /proc/stat")?)?;
         let cpu_usage_percent = self
             .previous_cpu
             .map(|previous| compute_cpu_usage(previous, cpu_sample));
         self.previous_cpu = Some(cpu_sample);
 
+        let dev_path = self.sys_root.join("proc/net/dev");
         let network_totals = parse_network_totals(
-            &fs::read_to_string("/proc/net/dev").context("read /proc/net/dev")?,
+            &fs::read_to_string(&dev_path).context("read /proc/net/dev")?,
         )?;
         let observed_at = Instant::now();
         let (rx_bytes_per_sec, tx_bytes_per_sec) = if let Some(previous) = self.previous_network {
@@ -88,14 +107,18 @@ impl HostCollector {
             tx_bytes: network_totals.tx_bytes,
         });
 
+        let loadavg_path = self.sys_root.join("proc/loadavg");
         let load = parse_load_average(
-            &fs::read_to_string("/proc/loadavg").context("read /proc/loadavg")?,
+            &fs::read_to_string(&loadavg_path).context("read /proc/loadavg")?,
         )?;
+        let meminfo_path = self.sys_root.join("proc/meminfo");
         let memory = parse_memory_usage(
-            &fs::read_to_string("/proc/meminfo").context("read /proc/meminfo")?,
+            &fs::read_to_string(&meminfo_path).context("read /proc/meminfo")?,
         )?;
-        let uptime_secs = read_uptime("/proc/uptime")?;
-        let disks = collect_disks("/proc/mounts")?;
+        let uptime_path = self.sys_root.join("proc/uptime");
+        let uptime_secs = read_uptime(&uptime_path)?;
+        let mounts_path = self.sys_root.join("proc/mounts");
+        let disks = collect_disks(&mounts_path)?;
 
         Ok(NodeSnapshot {
             collected_at: Utc::now(),
@@ -115,20 +138,20 @@ impl HostCollector {
 }
 
 /// 读取文件文本并去除首尾空白。
-fn read_trimmed(path: &str) -> Result<String> {
+fn read_trimmed(path: &std::path::Path) -> Result<String> {
     Ok(fs::read_to_string(path)
-        .with_context(|| format!("read {path}"))?
+        .with_context(|| format!("read {}", path.display()))?
         .trim()
         .to_string())
 }
 
-fn read_hostname(path: &str) -> Result<String> {
+fn read_hostname(path: &std::path::Path) -> Result<String> {
     read_trimmed(path)
 }
 
 /// 解析 `/etc/os-release`,优先返回 `PRETTY_NAME`,缺失时退化到 `NAME`。
-fn read_os_name(path: &str) -> Result<String> {
-    let content = fs::read_to_string(path).with_context(|| format!("read {path}"))?;
+fn read_os_name(path: &std::path::Path) -> Result<String> {
+    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     for line in content.lines() {
         if let Some(value) = line.strip_prefix("PRETTY_NAME=") {
             return Ok(strip_quotes(value));
@@ -137,7 +160,7 @@ fn read_os_name(path: &str) -> Result<String> {
             return Ok(strip_quotes(value));
         }
     }
-    Err(anyhow!("NAME not found in {path}"))
+    Err(anyhow!("NAME not found in {}", path.display()))
 }
 
 fn strip_quotes(value: &str) -> String {
@@ -145,19 +168,19 @@ fn strip_quotes(value: &str) -> String {
 }
 
 /// 从 `/proc/cpuinfo` 中提取第一处 `model name`。
-fn read_cpu_model(path: &str) -> Result<String> {
-    let content = fs::read_to_string(path).with_context(|| format!("read {path}"))?;
+fn read_cpu_model(path: &std::path::Path) -> Result<String> {
+    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     for line in content.lines() {
         if let Some(value) = line.strip_prefix("model name\t: ") {
             return Ok(value.trim().to_string());
         }
     }
-    Err(anyhow!("model name not found in {path}"))
+    Err(anyhow!("model name not found in {}", path.display()))
 }
 
 /// 通过统计 `processor` 行的数量得到逻辑核心数;至少返回 1。
-fn count_cpu_cores(path: &str) -> Result<u32> {
-    let content = fs::read_to_string(path).with_context(|| format!("read {path}"))?;
+fn count_cpu_cores(path: &std::path::Path) -> Result<u32> {
+    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let count = content
         .lines()
         .filter(|line| line.starts_with("processor\t:"))
@@ -166,19 +189,19 @@ fn count_cpu_cores(path: &str) -> Result<u32> {
 }
 
 /// 读取 `/proc/uptime` 的整数秒部分。
-fn read_uptime(path: &str) -> Result<u64> {
-    let content = fs::read_to_string(path).with_context(|| format!("read {path}"))?;
+fn read_uptime(path: &std::path::Path) -> Result<u64> {
+    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let raw = content
         .split_whitespace()
         .next()
-        .ok_or_else(|| anyhow!("missing uptime field in {path}"))?;
+        .ok_or_else(|| anyhow!("missing uptime field in {}", path.display()))?;
     let seconds = raw
         .split('.')
         .next()
-        .ok_or_else(|| anyhow!("invalid uptime field in {path}"))?;
+        .ok_or_else(|| anyhow!("invalid uptime field in {}", path.display()))?;
     seconds
         .parse::<u64>()
-        .with_context(|| format!("invalid uptime value in {path}"))
+        .with_context(|| format!("invalid uptime value in {}", path.display()))
 }
 
 /// 解析 `/proc/stat` 中的 `cpu ` 聚合行。
@@ -347,8 +370,8 @@ fn parse_network_line_counters(counters: &str, iface: &str) -> Result<(u64, u64)
 
 /// 遍历 `/proc/mounts` 并通过 `statvfs` 获取各挂载点的容量信息。
 /// 同一挂载点重复出现时只保留第一条;特殊虚拟文件系统会被忽略。
-fn collect_disks(mounts_path: &str) -> Result<Vec<DiskUsage>> {
-    let content = fs::read_to_string(mounts_path).with_context(|| format!("read {mounts_path}"))?;
+fn collect_disks(mounts_path: &std::path::Path) -> Result<Vec<DiskUsage>> {
+    let content = fs::read_to_string(mounts_path).with_context(|| format!("read {}", mounts_path.display()))?;
     let mut seen_mounts = HashSet::new();
     let mut seen_devices = HashSet::new();
     let mut disks = Vec::new();
@@ -522,5 +545,87 @@ mod tests {
         let (rx_rate, tx_rate) = compute_network_rates(previous, Instant::now(), totals);
         assert!(rx_rate.unwrap() > 40.0);
         assert!(tx_rate.unwrap() > 20.0);
+    }
+
+    #[test]
+    fn test_host_collector_with_mock_files() {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("nodelite-collector-test-{timestamp}"));
+        std::fs::create_dir_all(temp_dir.join("proc/sys/kernel")).unwrap();
+        std::fs::create_dir_all(temp_dir.join("proc/net")).unwrap();
+        std::fs::create_dir_all(temp_dir.join("etc")).unwrap();
+
+        // Write mock files
+        std::fs::write(temp_dir.join("proc/uptime"), "3600.50 12345.67\n").unwrap();
+        std::fs::write(temp_dir.join("proc/sys/kernel/hostname"), "mock-host\n").unwrap();
+        std::fs::write(temp_dir.join("etc/os-release"), "PRETTY_NAME=\"Mock Linux OS\"\n").unwrap();
+        std::fs::write(temp_dir.join("proc/sys/kernel/osrelease"), "6.8.0-mock\n").unwrap();
+        std::fs::write(
+            temp_dir.join("proc/cpuinfo"),
+            "processor\t: 0\nmodel name\t: Mock CPU @ 3.0GHz\n\nprocessor\t: 1\nmodel name\t: Mock CPU @ 3.0GHz\n",
+        ).unwrap();
+        std::fs::write(temp_dir.join("proc/stat"), "cpu  100 0 50 400 10 0 0 0 0 0\ncpu0 50 0 25 200 5 0 0 0 0 0\n").unwrap();
+        std::fs::write(
+            temp_dir.join("proc/net/dev"),
+            "Inter-|   Receive                                                |  Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n eth0: 200 0 0 0 0 0 0 0 100 0 0 0 0 0 0 0\n",
+        ).unwrap();
+        std::fs::write(temp_dir.join("proc/loadavg"), "0.15 0.30 0.45 1/100 12345\n").unwrap();
+        std::fs::write(
+            temp_dir.join("proc/meminfo"),
+            "MemTotal:       2097152 kB\nMemFree:         524288 kB\nMemAvailable:   1048576 kB\nSwapTotal:      1048576 kB\nSwapFree:        524288 kB\n",
+        ).unwrap();
+        std::fs::write(
+            temp_dir.join("proc/mounts"),
+            "/dev/vda1 / ext4 rw,relatime 0 0\ntmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0\n",
+        ).unwrap();
+
+        let mut collector = super::HostCollector::new_with_root(temp_dir.clone());
+        let config = nodelite_proto::AgentConfig {
+            node_id: "test-node".to_string(),
+            node_label: "Test Node".to_string(),
+            server: "ws://127.0.0.1:8080/ws".to_string(),
+            token: "token".to_string(),
+            connect_timeout_secs: 5,
+            report_interval_secs: 5,
+            max_incoming_message_bytes: 65536,
+            insecure_transport_warn_interval_secs: 900,
+            tags: vec!["mock-tag".to_string()],
+            hostname_override: None,
+        };
+
+        // Check identity collection
+        let identity = collector.collect_identity(&config, "1.0.0").unwrap();
+        assert_eq!(identity.node_id, "test-node");
+        assert_eq!(identity.hostname, "mock-host");
+        assert_eq!(identity.os, "Mock Linux OS");
+        assert_eq!(identity.kernel_version, Some("6.8.0-mock".to_string()));
+        assert_eq!(identity.cpu_model, Some("Mock CPU @ 3.0GHz".to_string()));
+        assert_eq!(identity.cpu_cores, 2);
+        assert_eq!(identity.agent_version, "1.0.0");
+        assert_eq!(identity.tags, vec!["mock-tag".to_string()]);
+
+        // Check snapshot collection (first collection has None rates)
+        let snapshot1 = collector.collect_snapshot().unwrap();
+        assert_eq!(snapshot1.uptime_secs, 3600);
+        assert_eq!(snapshot1.load.one, 0.15);
+        assert_eq!(snapshot1.load.five, 0.30);
+        assert_eq!(snapshot1.load.fifteen, 0.45);
+        assert_eq!(snapshot1.memory.total_bytes, 2097152 * 1024);
+        assert_eq!(snapshot1.memory.available_bytes, 1048576 * 1024);
+        assert_eq!(snapshot1.memory.used_bytes, 1048576 * 1024);
+        assert_eq!(snapshot1.memory.swap_total_bytes, 1048576 * 1024);
+        assert_eq!(snapshot1.memory.swap_used_bytes, 524288 * 1024);
+
+        // Assert network totals
+        assert_eq!(snapshot1.network.total_rx_bytes, 200);
+        assert_eq!(snapshot1.network.total_tx_bytes, 100);
+        assert_eq!(snapshot1.network.rx_bytes_per_sec, None);
+        assert_eq!(snapshot1.network.tx_bytes_per_sec, None);
+
+        // Cleanup
+        std::fs::remove_dir_all(temp_dir).unwrap();
     }
 }
