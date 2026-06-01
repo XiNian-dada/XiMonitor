@@ -34,7 +34,7 @@ async function mountList(nodes: ReturnType<typeof makeNode>[]) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const store = useNodesStore();
-  store.nodes = nodes;
+  store.applyServerState(nodes, new Date().toISOString());
   const wrapper = mount(NodeList, {
     global: {
       plugins: [pinia, getI18n()],
