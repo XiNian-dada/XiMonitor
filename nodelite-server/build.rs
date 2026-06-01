@@ -7,20 +7,39 @@ use std::path::Path;
 use std::process::Command;
 
 fn main() {
-    // Allow skipping web build for backend-only iteration
+    // Toggling skip mode must re-run this script; otherwise Cargo caches the
+    // previous build-script decision and silently reuses (or skips) the build.
+    println!("cargo:rerun-if-env-changed=NODELITE_SKIP_WEB_BUILD");
+
+    // Allow skipping the web build for backend-only iteration / CI jobs that
+    // reuse a prebuilt web/dist. `web_assets.rs` embeds web/dist at compile time
+    // via include_dir!, which panics if the directory is missing — so a skip
+    // with no prebuilt dist cannot "serve a placeholder"; fail loudly here
+    // instead of letting it surface as an opaque macro panic later.
     if std::env::var("NODELITE_SKIP_WEB_BUILD").is_ok() {
-        // If web/dist/ exists, reuse it; otherwise emit a warning but don't fail
         if !Path::new("web/dist/index.html").exists() {
-            println!(
-                "cargo:warning=NODELITE_SKIP_WEB_BUILD set but web/dist/ is empty; \
-                 server will serve a placeholder. Run `pnpm --dir web build` first."
-            );
+            eprintln!();
+            eprintln!("===========================================================");
+            eprintln!(" NODELITE_SKIP_WEB_BUILD is set but web/dist/index.html");
+            eprintln!(" is missing.");
+            eprintln!();
+            eprintln!(" web/dist is gitignored and embedded at compile time via");
+            eprintln!(" include_dir!, so the build cannot proceed without it.");
+            eprintln!();
+            eprintln!(" Build the frontend first:");
+            eprintln!("   pnpm --dir web build");
+            eprintln!(" or unset NODELITE_SKIP_WEB_BUILD to build it automatically.");
+            eprintln!("===========================================================");
+            std::process::exit(1);
         }
         return;
     }
 
-    // Tell cargo to rerun this script if any of these paths change
+    // Tell cargo to rerun this script if any of these paths change. web/public
+    // is copied verbatim into web/dist by Vite (verify-2fa.html, ui-i18n.json,
+    // logos), so edits there must invalidate the embedded assets too.
     println!("cargo:rerun-if-changed=web/src");
+    println!("cargo:rerun-if-changed=web/public");
     println!("cargo:rerun-if-changed=web/index.html");
     println!("cargo:rerun-if-changed=web/package.json");
     println!("cargo:rerun-if-changed=web/pnpm-lock.yaml");
