@@ -40,6 +40,10 @@ tracing-subscriber.workspace = true
 url.workspace = true
 webpki-roots = "1.0"
 nodelite-proto = { path = "../nodelite-proto" }
+include_dir = "0.7"
+
+[build-dependencies]
+which = "6"
 
 [dev-dependencies]
 proptest = "1.4"

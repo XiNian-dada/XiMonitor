@@ -24,10 +24,7 @@ pub(crate) use auth_routes::{
     healthz, logout_and_reauth, readyz, require_readonly_auth, verify_2fa_api,
 };
 pub(crate) use install::{install_agent_script, install_bootstrap};
-pub(crate) use pages::{
-    brand_logo_dark_asset, brand_logo_light_asset, index, index_alert_settings_js_asset,
-    index_settings_js_asset, node_detail, ui_i18n_asset, verify_2fa_page,
-};
+pub(crate) use pages::{index, node_detail, static_asset, verify_2fa_page};
 pub(crate) use settings::{
     alert_settings, change_readonly_password, disable_two_factor, enable_two_factor,
     refresh_node_token, server_update_log, settings, start_server_update, start_two_factor_setup,
