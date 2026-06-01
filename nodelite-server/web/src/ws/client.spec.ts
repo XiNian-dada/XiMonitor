@@ -314,4 +314,60 @@ describe('WsClient', () => {
       expect(client.getState().kind).toBe('reconnecting');
     }, 45000);
   });
+
+  describe('reconnect stop condition', () => {
+    it('stops reconnecting after 3 consecutive handshake failures', async () => {
+      client = new WsClient('ws://localhost:1234/ws/browser');
+
+      // Attempt 1: connect but server never opens
+      client.connect();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Simulate connection error before onopen
+      if (client['ws']) {
+        client['ws'].dispatchEvent(new Event('error'));
+        client['ws'].close();
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(client.getState().kind).toBe('reconnecting');
+
+      // Attempt 2: wait for reconnect delay
+      const state1 = client.getState();
+      if (state1.kind === 'reconnecting') {
+        const delay = state1.nextAttemptAt - Date.now();
+        await new Promise((resolve) => setTimeout(resolve, delay + 100));
+      }
+
+      // Simulate second failure
+      if (client['ws']) {
+        client['ws'].dispatchEvent(new Event('error'));
+        client['ws'].close();
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(client.getState().kind).toBe('reconnecting');
+
+      // Attempt 3: wait for reconnect delay
+      const state2 = client.getState();
+      if (state2.kind === 'reconnecting') {
+        const delay = state2.nextAttemptAt - Date.now();
+        await new Promise((resolve) => setTimeout(resolve, delay + 100));
+      }
+
+      // Simulate third failure
+      if (client['ws']) {
+        client['ws'].dispatchEvent(new Event('error'));
+        client['ws'].close();
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // After 3 failures, should be in failed state
+      expect(client.getState()).toEqual({
+        kind: 'failed',
+        reason: 'auth_or_unreachable',
+      });
+    }, 15000);
+  });
 });
