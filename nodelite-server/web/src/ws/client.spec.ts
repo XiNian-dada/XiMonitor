@@ -13,6 +13,7 @@ describe('WsClient', () => {
       configurable: true,
       value: false,
     });
+    document.body.removeAttribute('data-ws-conn-id');
   });
 
   afterEach(() => {

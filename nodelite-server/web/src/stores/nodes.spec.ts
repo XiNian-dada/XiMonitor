@@ -73,4 +73,76 @@ describe('useNodesStore', () => {
     await first;
     expect(mockListNodes).toHaveBeenCalledTimes(1);
   });
+
+  describe('incremental updates (WS)', () => {
+    it('applyServerState replaces the entire Map', () => {
+      const store = useNodesStore();
+      const a = makeNode({ identity: { node_id: 'a', node_label: 'A', hostname: 'a', tags: [] } });
+      const b = makeNode({ identity: { node_id: 'b', node_label: 'B', hostname: 'b', tags: [] } });
+
+      store.applyServerState([a], '2026-06-01T12:00:00Z');
+      expect(store.nodes).toEqual([a]);
+
+      store.applyServerState([b], '2026-06-01T12:01:00Z');
+      expect(store.nodes).toEqual([b]);
+    });
+
+    it('upsertNode merges into the Map', () => {
+      const store = useNodesStore();
+      const a = makeNode({ identity: { node_id: 'a', node_label: 'A', hostname: 'a', tags: [] } });
+      const b = makeNode({ identity: { node_id: 'b', node_label: 'B', hostname: 'b', tags: [] } });
+
+      store.applyServerState([a], '2026-06-01T12:00:00Z');
+      store.upsertNode(b, '2026-06-01T12:01:00Z');
+
+      expect(store.nodes).toHaveLength(2);
+      expect(store.nodes).toContainEqual(a);
+      expect(store.nodes).toContainEqual(b);
+    });
+
+    it('removeNode deletes from the Map', () => {
+      const store = useNodesStore();
+      const a = makeNode({ identity: { node_id: 'a', node_label: 'A', hostname: 'a', tags: [] } });
+      const b = makeNode({ identity: { node_id: 'b', node_label: 'B', hostname: 'b', tags: [] } });
+
+      store.applyServerState([a, b], '2026-06-01T12:00:00Z');
+      store.removeNode('a', '2026-06-01T12:01:00Z');
+
+      expect(store.nodes).toEqual([b]);
+    });
+
+    it('rejects stale applyServerState', () => {
+      const store = useNodesStore();
+      const a = makeNode({ identity: { node_id: 'a', node_label: 'A', hostname: 'a', tags: [] } });
+      const b = makeNode({ identity: { node_id: 'b', node_label: 'B', hostname: 'b', tags: [] } });
+
+      store.applyServerState([a], '2026-06-01T12:01:00Z');
+      store.applyServerState([b], '2026-06-01T12:00:00Z');
+
+      expect(store.nodes).toEqual([a]);
+    });
+
+    it('rejects stale upsertNode', () => {
+      const store = useNodesStore();
+      const a = makeNode({ identity: { node_id: 'a', node_label: 'A', hostname: 'a', tags: [] } });
+      const aUpdated = makeNode({
+        identity: { node_id: 'a', node_label: 'A Updated', hostname: 'a', tags: [] },
+      });
+
+      store.applyServerState([a], '2026-06-01T12:01:00Z');
+      store.upsertNode(aUpdated, '2026-06-01T12:00:00Z');
+
+      expect(store.nodes[0].identity.node_label).toBe('A');
+    });
+
+    it('rejects stale removeNode', () => {
+      const store = useNodesStore();
+      const a = makeNode({ identity: { node_id: 'a', node_label: 'A', hostname: 'a', tags: [] } });
+
+      store.applyServerState([a], '2026-06-01T12:01:00Z');
+      store.removeNode('a', '2026-06-01T12:00:00Z');
+
+      expect(store.nodes).toEqual([a]);
+    });
+  });
 });
