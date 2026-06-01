@@ -6,6 +6,14 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[lib]
+name = "nodelite_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nodelite-agent"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true

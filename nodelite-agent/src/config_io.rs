@@ -7,7 +7,7 @@ use tokio::fs;
 use toml_edit::{DocumentMut, Item, Value};
 
 /// 从磁盘读取并解析 Agent 配置文件。
-pub(crate) async fn load_agent_config(path: &Path) -> Result<AgentConfig> {
+pub async fn load_agent_config(path: &Path) -> Result<AgentConfig> {
     let content = fs::read_to_string(path)
         .await
         .with_context(|| format!("failed to read config file {}", path.display()))?;
@@ -19,7 +19,7 @@ pub(crate) async fn load_agent_config(path: &Path) -> Result<AgentConfig> {
 ///
 /// 在 `spawn_blocking` 中以"读 → 改 → 写 → fsync → rename → fsync 父目录"
 /// 的方式持久化新 token,等同于 server registry 的写入级别。
-pub(crate) async fn update_token_in_config(config_path: &Path, new_token: &str) -> Result<()> {
+pub async fn update_token_in_config(config_path: &Path, new_token: &str) -> Result<()> {
     let config_path = config_path.to_path_buf();
     let new_token = new_token.to_string();
     tokio::task::spawn_blocking(move || persist_token_sync(&config_path, &new_token))

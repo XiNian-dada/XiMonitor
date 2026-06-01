@@ -25,7 +25,7 @@ struct Cli {
     sample_once: bool,
 }
 
-pub(crate) async fn run() -> Result<()> {
+pub async fn run() -> Result<()> {
     init_tracing();
     install_rustls_crypto_provider()?;
 

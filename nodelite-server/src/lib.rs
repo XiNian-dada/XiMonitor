@@ -26,7 +26,7 @@ mod history;
 #[cfg(test)]
 #[path = "../tests/integration/mod.rs"]
 mod integration_tests;
-#[cfg(test)]
+#[cfg(any(test, feature = "load_test"))]
 mod load_test;
 mod qr;
 mod registry;
