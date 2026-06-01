@@ -268,4 +268,50 @@ describe('WsClient', () => {
       expect(id2).toBe('2');
     });
   });
+
+  describe('heartbeat (Ping/Pong)', () => {
+    it('sends Ping after 30s and restarts timer on Pong', async () => {
+      server = new WS('ws://localhost:1234/ws/browser');
+      client = new WsClient('ws://localhost:1234/ws/browser');
+
+      client.connect();
+      await server.connected;
+
+      // Wait for first ping (30s)
+      await new Promise((resolve) => setTimeout(resolve, 30100));
+
+      expect(server.messages.length).toBeGreaterThan(0);
+      expect(server.messages[0]).toBe(JSON.stringify({ type: 'ping' }));
+
+      // Send pong
+      server.send(JSON.stringify({ type: 'pong' }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Wait for second ping (another 30s)
+      await new Promise((resolve) => setTimeout(resolve, 30100));
+
+      const pings = server.messages.filter((m) => m === JSON.stringify({ type: 'ping' }));
+      expect(pings.length).toBeGreaterThanOrEqual(2);
+    }, 65000);
+
+    it('closes connection if Pong not received within 10s', async () => {
+      server = new WS('ws://localhost:1234/ws/browser');
+      client = new WsClient('ws://localhost:1234/ws/browser');
+
+      client.connect();
+      await server.connected;
+
+      expect(client.getState().kind).toBe('open');
+
+      // Wait for ping (30s)
+      await new Promise((resolve) => setTimeout(resolve, 30100));
+
+      expect(server.messages).toContain(JSON.stringify({ type: 'ping' }));
+
+      // Don't send pong, wait for timeout (10s)
+      await new Promise((resolve) => setTimeout(resolve, 10100));
+
+      expect(client.getState().kind).toBe('reconnecting');
+    }, 45000);
+  });
 });

@@ -21,6 +21,9 @@ export class WsClient {
   private connectionId = 0;
   private handshakeFailures = 0;
 
+  private pingTimer: ReturnType<typeof setTimeout> | null = null;
+  private pongTimer: ReturnType<typeof setTimeout> | null = null;
+
   private readonly handlers = new Map<string, Set<MessageHandler<BrowserMessage['type']>>>();
 
   constructor(private readonly url: string) {}
@@ -45,6 +48,7 @@ export class WsClient {
 
   disconnect(): void {
     this.clearReconnectTimer();
+    this.clearHeartbeat();
     this.setState({ kind: 'failed', reason: 'auth_or_unreachable' });
     if (this.ws) {
       this.ws.close();
@@ -84,12 +88,19 @@ export class WsClient {
       document.body.setAttribute('data-ws-conn-id', String(this.connectionId));
     }
 
+    this.startHeartbeat();
     console.log('WebSocket connected');
   }
 
   private onMessage(event: MessageEvent): void {
     try {
       const msg = JSON.parse(event.data) as BrowserMessage;
+
+      if (msg.type === 'pong') {
+        this.clearPongTimer();
+        return;
+      }
+
       const set = this.handlers.get(msg.type);
       if (set) {
         set.forEach((handler) => handler(msg));
@@ -109,6 +120,7 @@ export class WsClient {
   private onClose(event: CloseEvent): void {
     console.log('WebSocket closed', event.code, event.reason);
     this.ws = null;
+    this.clearHeartbeat();
 
     if (this.state.kind === 'failed') return;
 
@@ -148,5 +160,37 @@ export class WsClient {
 
   private setState(state: ConnectionState): void {
     this.state = state;
+  }
+
+  private startHeartbeat(): void {
+    this.clearHeartbeat();
+    this.pingTimer = setTimeout(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: 'ping' }));
+        this.pongTimer = setTimeout(() => {
+          console.warn('Pong timeout, closing connection');
+          if (this.ws) this.ws.close();
+        }, 10000);
+      }
+    }, 30000);
+  }
+
+  private clearPongTimer(): void {
+    if (this.pongTimer !== null) {
+      clearTimeout(this.pongTimer);
+      this.pongTimer = null;
+    }
+    this.startHeartbeat();
+  }
+
+  private clearHeartbeat(): void {
+    if (this.pingTimer !== null) {
+      clearTimeout(this.pingTimer);
+      this.pingTimer = null;
+    }
+    if (this.pongTimer !== null) {
+      clearTimeout(this.pongTimer);
+      this.pongTimer = null;
+    }
   }
 }
