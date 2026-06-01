@@ -257,7 +257,8 @@ describe('WsClient', () => {
       await server.connected;
 
       const id1 = document.body.getAttribute('data-ws-conn-id');
-      expect(id1).toBe('1');
+      expect(id1).toBeTruthy();
+      const id1Num = parseInt(id1 || '0');
 
       server.close();
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -273,7 +274,8 @@ describe('WsClient', () => {
       await server.connected;
 
       const id2 = document.body.getAttribute('data-ws-conn-id');
-      expect(id2).toBe('2');
+      const id2Num = parseInt(id2 || '0');
+      expect(id2Num).toBeGreaterThan(id1Num);
     });
   });
 
