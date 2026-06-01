@@ -302,6 +302,12 @@ pub(crate) fn build_router(state: AppState) -> Router {
     let protected_routes = Router::new()
         .route("/", get(index))
         .route("/nodes/{node_id}", get(node_detail))
+        // SPA history-mode routes: every top-level Vue route must return the SPA
+        // shell so deep links / refresh boot the app instead of hitting a 404.
+        // Keep in sync with web/src/router/index.ts.
+        .route("/settings", get(index))
+        .route("/account", get(index))
+        .route("/alerts", get(index))
         .route("/assets/{*path}", get(static_asset))
         .route("/api/bootstrap", get(bootstrap))
         .route("/api/overview", get(overview))

@@ -371,6 +371,62 @@ fn router_compresses_text_assets_but_not_webp() {
 }
 
 #[test]
+fn spa_history_mode_routes_serve_index_shell() {
+    let runtime = Runtime::new().expect("runtime should build");
+    runtime.block_on(async {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic enough")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("nodelite-spa-routes-test-{unique}"));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let registry_path = temp_dir.join("server.json");
+        let mut config = test_server_config(
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
+            "https://monitor.example.com".to_string(),
+            registry_path,
+            temp_dir.join("history.sqlite3"),
+            temp_dir.join("snapshot.json"),
+        );
+        config.readonly_auth = None;
+        config.ws = test_ws_config(32, 8);
+        let state = AppState::test_fixture(config.into(), Arc::new(temp_dir.join("server.toml")))
+            .await
+            .expect("state fixture should build");
+        let app = crate::startup::build_router(state.clone());
+
+        // Every history-mode route in web/src/router/index.ts must return the SPA
+        // shell so deep links / refresh boot Vue instead of 404ing on the backend.
+        for path in ["/", "/nodes/osaka-01", "/settings", "/account", "/alerts"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("response should be produced");
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{path} should serve the SPA shell"
+            );
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE),
+                Some(&HeaderValue::from_static("text/html; charset=utf-8")),
+                "{path} should return index.html",
+            );
+        }
+
+        state.history.shutdown().await;
+        state.audit_log.shutdown().await;
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    });
+}
+
+#[test]
 fn protected_routes_attach_security_headers() {
     let runtime = Runtime::new().expect("runtime should build");
     runtime.block_on(async {
