@@ -40,7 +40,7 @@ mod web_assets;
 mod ws;
 
 #[cfg(test)]
-#[path = "lib_tests.rs"]
+#[path = "tests/mod.rs"]
 mod tests;
 
 use clap::Parser;

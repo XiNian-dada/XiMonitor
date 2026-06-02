@@ -10,14 +10,16 @@ use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, header};
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use chrono::Utc;
-use ipnet::IpNet;
 use serde_json::json;
 use tokio::runtime::Runtime;
 use tower::util::ServiceExt;
 
 use super::{
-    AppState, PROTECTED_CACHE_CONTROL, ServerReadiness, set_protected_response_headers,
-    uses_insecure_remote_public_base_url,
+    AppState, ServerReadiness, set_protected_response_headers, uses_insecure_remote_public_base_url,
+};
+use super::support::{
+    assert_security_headers, json_request, json_write_routes, protected_ok, protected_request,
+    small_json_write_requests, trusted_proxies, two_factor_auth_test_state, ws_upgrade_request,
 };
 use crate::admission::{
     InstallAdmissionConfig, InstallAdmissionController, WsAdmissionController, WsAdmissionError,
@@ -496,27 +498,6 @@ fn protected_routes_attach_security_headers() {
     });
 }
 
-fn assert_security_headers(headers: &HeaderMap) {
-    assert_eq!(
-        headers.get(header::X_CONTENT_TYPE_OPTIONS),
-        Some(&header::HeaderValue::from_static("nosniff")),
-    );
-    assert_eq!(
-        headers.get(header::REFERRER_POLICY),
-        Some(&header::HeaderValue::from_static(
-            "strict-origin-when-cross-origin",
-        )),
-    );
-    assert_eq!(
-        headers.get(header::CACHE_CONTROL),
-        Some(&header::HeaderValue::from_static(PROTECTED_CACHE_CONTROL,)),
-    );
-    assert_eq!(
-        headers.get(header::PRAGMA),
-        Some(&header::HeaderValue::from_static("no-cache")),
-    );
-}
-
 #[test]
 fn public_auth_routes_attach_security_headers() {
     let runtime = Runtime::new().expect("runtime should build");
@@ -701,33 +682,6 @@ fn readonly_auth_route_accepts_valid_basic_auth() {
         assert_eq!(response.status(), StatusCode::OK);
         let _ = std::fs::remove_dir_all(&temp_dir);
     });
-}
-
-/// 构造一个开启/关闭 2FA 的受保护认证测试状态,返回 (state, temp_dir)。
-async fn two_factor_auth_test_state(label: &str, enable_2fa: bool) -> (AppState, PathBuf) {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be monotonic enough")
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!("nodelite-{label}-{unique}"));
-    std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
-    let mut config = test_server_config(
-        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
-        "https://monitor.example.com".to_string(),
-        temp_dir.join("server.json"),
-        temp_dir.join("history.sqlite3"),
-        temp_dir.join("snapshot.json"),
-    );
-    config.readonly_auth = Some(nodelite_proto::ReadonlyAuthConfig {
-        username: "viewer".to_string(),
-        password: "secret".to_string(),
-        enable_2fa,
-        totp_secret: enable_2fa.then(|| "JBSWY3DPEHPK3PXP".to_string()),
-    });
-    let state = AppState::test_fixture(config.into(), Arc::new(temp_dir.join("server.toml")))
-        .await
-        .expect("state fixture should build");
-    (state, temp_dir)
 }
 
 #[test]
@@ -1651,125 +1605,6 @@ fn truncate_to_byte_boundary_handles_utf8_widths_with_bounded_scan() {
         assert!(value.len() <= max_bytes);
         assert!(value.is_char_boundary(value.len()));
     }
-}
-
-fn trusted_proxies(cidrs: &[&str]) -> Vec<IpNet> {
-    cidrs
-        .iter()
-        .map(|cidr| cidr.parse::<IpNet>().expect("valid cidr"))
-        .collect()
-}
-
-async fn protected_ok() -> StatusCode {
-    StatusCode::OK
-}
-
-fn protected_request(
-    method: &str,
-    uri: &str,
-    auth_header: Option<&str>,
-    peer_addr: SocketAddr,
-) -> Request<Body> {
-    let mut builder = Request::builder().method(method).uri(uri);
-    if let Some(auth_header) = auth_header {
-        builder = builder.header(header::AUTHORIZATION, auth_header);
-    }
-    let mut request = builder.body(Body::empty()).expect("request should build");
-    request.extensions_mut().insert(ConnectInfo(peer_addr));
-    request
-}
-
-/// 构造一个带 `Upgrade: websocket` 头的 GET 请求,模拟浏览器 WebSocket 握手。
-fn ws_upgrade_request(
-    uri: &str,
-    auth_header: Option<&str>,
-    peer_addr: SocketAddr,
-) -> Request<Body> {
-    let mut builder = Request::builder()
-        .method("GET")
-        .uri(uri)
-        .header(header::CONNECTION, "Upgrade")
-        .header(header::UPGRADE, "websocket");
-    if let Some(auth_header) = auth_header {
-        builder = builder.header(header::AUTHORIZATION, auth_header);
-    }
-    let mut request = builder.body(Body::empty()).expect("request should build");
-    request.extensions_mut().insert(ConnectInfo(peer_addr));
-    request
-}
-
-fn json_request(
-    method: &str,
-    uri: &str,
-    auth_header: Option<&str>,
-    body: impl Into<Body>,
-) -> Request<Body> {
-    let mut builder = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header(header::CONTENT_TYPE, "application/json");
-    if let Some(auth_header) = auth_header {
-        builder = builder.header(header::AUTHORIZATION, auth_header);
-    }
-    let mut request = builder.body(body.into()).expect("request should build");
-    request
-        .extensions_mut()
-        .insert(ConnectInfo(SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::LOCALHOST,
-            51234,
-        ))));
-    request
-}
-
-fn json_write_routes() -> [(&'static str, Option<&'static str>); 7] {
-    [
-        ("/api/verify-2fa", None),
-        (
-            "/api/nodes/test-node/refresh-token",
-            Some(TEST_BASIC_AUTH_HEADER),
-        ),
-        ("/api/settings/password", Some(TEST_BASIC_AUTH_HEADER)),
-        ("/api/settings/alerts", Some(TEST_BASIC_AUTH_HEADER)),
-        ("/api/settings/update/server", Some(TEST_BASIC_AUTH_HEADER)),
-        ("/api/settings/2fa/enable", Some(TEST_BASIC_AUTH_HEADER)),
-        ("/api/settings/2fa/disable", Some(TEST_BASIC_AUTH_HEADER)),
-    ]
-}
-
-fn small_json_write_requests() -> [(&'static str, Option<&'static str>, &'static str); 7] {
-    [
-        ("/api/verify-2fa", None, r#"{"code":"000000"}"#),
-        (
-            "/api/nodes/test-node/refresh-token",
-            Some(TEST_BASIC_AUTH_HEADER),
-            r#"{"current_password":"wrong"}"#,
-        ),
-        (
-            "/api/settings/password",
-            Some(TEST_BASIC_AUTH_HEADER),
-            r#"{"current_password":"wrong","new_password":"new-secret-password"}"#,
-        ),
-        (
-            "/api/settings/alerts",
-            Some(TEST_BASIC_AUTH_HEADER),
-            r#"{"current_password":"wrong","enabled":false,"smtp":{"enabled":false,"host":"","port":587,"username":"","password":null,"sender":"","recipients":[],"transport":"starttls","send_resolved":true},"webhook":{"enabled":false,"url":"","secret":null,"send_resolved":true},"rules":[],"inspection":{"enabled":false,"local_time":"09:00","lookback_hours":24,"delivery":[],"offline_grace_minutes":10,"latency_warn_ms":250,"cpu_warn_percent":85,"memory_warn_percent":90}}"#,
-        ),
-        (
-            "/api/settings/update/server",
-            Some(TEST_BASIC_AUTH_HEADER),
-            r#"{"current_password":"wrong"}"#,
-        ),
-        (
-            "/api/settings/2fa/enable",
-            Some(TEST_BASIC_AUTH_HEADER),
-            r#"{"current_password":"wrong","secret":"JBSWY3DPEHPK3PXP","code":"000000"}"#,
-        ),
-        (
-            "/api/settings/2fa/disable",
-            Some(TEST_BASIC_AUTH_HEADER),
-            r#"{"current_password":"wrong","code":"000000"}"#,
-        ),
-    ]
 }
 
 #[test]
