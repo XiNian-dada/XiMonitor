@@ -47,7 +47,7 @@ pub fn new_collector() -> HostCollector {
 
 impl HostCollector {
     #[cfg(test)]
-    pub fn new_with_root(sys_root: std::path::PathBuf) -> Self {
+    fn new_with_root(sys_root: std::path::PathBuf) -> Self {
         Self {
             sys_root,
             previous_cpu: None,
@@ -59,7 +59,7 @@ impl HostCollector {
 
     /// 注入磁盘容量探测桩,使快照采集完全脱离真实文件系统。仅供测试使用。
     #[cfg(test)]
-    pub fn with_statvfs(mut self, statvfs: StatvfsFn) -> Self {
+    fn with_statvfs(mut self, statvfs: StatvfsFn) -> Self {
         self.statvfs = statvfs;
         self
     }

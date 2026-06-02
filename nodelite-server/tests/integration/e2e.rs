@@ -82,10 +82,12 @@ report_interval_secs = 1
         .spawn()
         .context("failed to spawn nodelite-agent process")?;
 
-    // 5. Wait for the agent to connect and authenticate
+    // 5. Wait for the agent to connect, authenticate, and report a snapshot.
+    //    The real agent reads uptime from the host's /proc/uptime, so we only
+    //    assert it is online and has reported metrics (not a specific uptime).
     let status = tokio::time::timeout(
-        Duration::from_secs(10),
-        server.wait_for_node_uptime(&node.node_id, 1, TEST_TIMEOUT),
+        TEST_TIMEOUT,
+        server.wait_for_node_online(&node.node_id, TEST_TIMEOUT),
     )
     .await;
 

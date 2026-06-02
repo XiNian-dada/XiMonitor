@@ -287,6 +287,22 @@ impl TestServer {
         .await
     }
 
+    /// 等待节点上线并至少上报过一次快照,但不校验具体 uptime 数值。
+    /// e2e 测试运行真实 agent,其 `uptime_secs` 取自宿主机 `/proc/uptime`,
+    /// 数值不可预知,因此只断言"在线且已上报快照"。
+    pub async fn wait_for_node_online(
+        &self,
+        node_id: &str,
+        timeout_duration: Duration,
+    ) -> Result<NodeStatus> {
+        self.wait_for_status(
+            timeout_duration,
+            |status| status.online && status.snapshot.is_some(),
+            node_id,
+        )
+        .await
+    }
+
     pub async fn wait_for_node_offline(
         &self,
         node_id: &str,

@@ -59,7 +59,26 @@ async fn run_mock_server(listener: TcpListener, new_token: String) -> Result<()>
         .send(Message::Text(refresh_payload.into()))
         .await?;
 
-    // 4. Close the websocket
+    // 4. Wait for the agent to acknowledge the refresh before closing the socket.
+    //    The agent reports metrics on an immediate first tick after authenticating,
+    //    so closing right after sending the refresh can race that send against the
+    //    server-side close and abort the session before the buffered refresh is
+    //    ever read. The agent flushes its log buffer (which echoes the refreshed
+    //    token) only after persisting the new token, so draining until we observe
+    //    that log proves the config file was written.
+    loop {
+        let frame = ws_stream
+            .next()
+            .await
+            .ok_or_else(|| anyhow!("agent closed before acknowledging token refresh"))??;
+        if let Message::Text(text) = frame
+            && text.contains("received refreshed token")
+        {
+            break;
+        }
+    }
+
+    // 5. Close the websocket
     ws_stream.close(None).await?;
     Ok(())
 }
