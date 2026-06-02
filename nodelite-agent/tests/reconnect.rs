@@ -62,8 +62,17 @@ async fn test_agent_reconnect_backoff_with_mock_time() -> Result<()> {
     let collector = new_collector();
     let log_buffer = AgentLogBuffer::default();
 
-    let agent_task =
-        tokio::spawn(run_forever(config, collector, identity, config_path, log_buffer));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let agent_task = tokio::spawn(run_forever(
+        config,
+        collector,
+        identity,
+        config_path,
+        log_buffer,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
 
     // 第一次连接:接受 TCP 后立刻断开,迫使 Agent 在认证前进入重连退避。
     let (stream1, _) = tokio::select! {
@@ -91,7 +100,8 @@ async fn test_agent_reconnect_backoff_with_mock_time() -> Result<()> {
     let (stream2, _) = accept_fut.await?;
     drop(stream2);
 
-    agent_task.abort();
+    let _ = shutdown_tx.send(());
+    let _ = agent_task.await;
     Ok(())
 }
 
@@ -111,8 +121,17 @@ async fn test_agent_token_expired_uses_long_backoff() -> Result<()> {
     let collector = new_collector();
     let log_buffer = AgentLogBuffer::default();
 
-    let agent_task =
-        tokio::spawn(run_forever(config, collector, identity, config_path, log_buffer));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let agent_task = tokio::spawn(run_forever(
+        config,
+        collector,
+        identity,
+        config_path,
+        log_buffer,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
 
     // 第一次连接:完成 WebSocket 握手,读取 Hello,然后下发 "token expired" 错误通知,
     // 触发 Agent 的 token 过期独立退避路径(首次 30s)。
@@ -140,7 +159,8 @@ async fn test_agent_token_expired_uses_long_backoff() -> Result<()> {
     let (stream2, _) = accept_fut.await?;
     drop(stream2);
 
-    agent_task.abort();
+    let _ = shutdown_tx.send(());
+    let _ = agent_task.await;
     Ok(())
 }
 

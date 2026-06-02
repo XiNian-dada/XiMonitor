@@ -19,7 +19,6 @@ use tracing::{info, warn};
 
 use crate::collector::HostCollector;
 use crate::config_io::update_token_in_config;
-use crate::support::shutdown_signal;
 
 /// Agent 本地最多暂存的待上报日志条数。超出后丢弃最旧项,避免断线期间内存无限增长。
 const MAX_PENDING_AGENT_LOGS: usize = 256;
@@ -95,16 +94,21 @@ impl AgentLogBuffer {
     }
 }
 
-/// 无限重连循环:无论会话以何种方式结束,都会按指数退避重试。
-pub async fn run_forever(
+pub async fn run_forever<F>(
     mut config: AgentConfig,
     mut collector: HostCollector,
     identity: nodelite_proto::NodeIdentity,
     config_path: PathBuf,
     mut log_buffer: AgentLogBuffer,
-) -> Result<()> {
+    shutdown: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = ()> + Send,
+{
     let mut reconnect_attempt = 0_u32;
     let mut token_expired_attempt = 0_u32;
+
+    tokio::pin!(shutdown);
 
     loop {
         let next = async {
@@ -166,7 +170,7 @@ pub async fn run_forever(
 
         tokio::select! {
             _ = next => continue,
-            _ = shutdown_signal() => {
+            _ = &mut shutdown => {
                 info!("agent shutting down");
                 return Ok(());
             }

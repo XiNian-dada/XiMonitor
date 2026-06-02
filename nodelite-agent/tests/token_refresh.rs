@@ -103,7 +103,7 @@ report_interval_secs = 5
     // Spawn mock server in the background
     let server_token = expected_new_token.clone();
     let server_task = tokio::spawn(async move {
-        let _ = run_mock_server(listener, server_token).await;
+        run_mock_server(listener, server_token).await
     });
 
     let mut collector = new_collector();
@@ -150,7 +150,10 @@ report_interval_secs = 5
     assert_eq!(config.token, "refreshed-rotated-token-12345");
 
     // 清理由 `TempDir` 的 Drop 负责。
-    let _ = server_task.await;
+    server_task
+        .await
+        .expect("mock server task panicked")
+        .expect("mock server should complete successfully");
 
     Ok(())
 }
