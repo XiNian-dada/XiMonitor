@@ -12,5 +12,7 @@ pub(crate) use super::{
 mod legacy;
 
 mod auth_runtime_tests;
+mod protected_headers_tests;
+mod readonly_auth_tests;
 mod route_surface_tests;
 mod support;
