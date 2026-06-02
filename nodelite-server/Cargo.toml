@@ -50,5 +50,8 @@ proptest = "1.4"
 tokio-tungstenite.workspace = true
 tower = "0.5"
 
+[features]
+load_test = []
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }

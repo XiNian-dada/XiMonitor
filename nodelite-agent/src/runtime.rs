@@ -10,7 +10,9 @@ use tracing::{info, warn};
 use crate::collector::new_collector;
 use crate::config_io::load_agent_config;
 use crate::session::{AgentLogBuffer, run_forever};
-use crate::support::{agent_build_version, init_tracing, install_rustls_crypto_provider};
+use crate::support::{
+    agent_build_version, init_tracing, install_rustls_crypto_provider, shutdown_signal,
+};
 
 /// 命令行参数。
 #[derive(Debug, Parser)]
@@ -25,7 +27,7 @@ struct Cli {
     sample_once: bool,
 }
 
-pub(crate) async fn run() -> Result<()> {
+pub async fn run() -> Result<()> {
     init_tracing();
     install_rustls_crypto_provider()?;
 
@@ -56,7 +58,15 @@ pub(crate) async fn run() -> Result<()> {
         config.server.clone(),
         config.insecure_transport_warn_interval_secs,
     );
-    run_forever(config, collector, identity, cli.config, log_buffer).await
+    run_forever(
+        config,
+        collector,
+        identity,
+        cli.config,
+        log_buffer,
+        shutdown_signal(),
+    )
+    .await
 }
 
 fn run_sample_once(

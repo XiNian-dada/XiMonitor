@@ -93,7 +93,10 @@ struct AgentWorkload {
 type TestSocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "manual load test; run with -- --ignored --nocapture"]
+#[cfg_attr(
+    not(feature = "load_test"),
+    ignore = "manual load test; run with -- --ignored --nocapture"
+)]
 async fn load_test_scaling_scores() {
     if let Err(error) = scenarios::run_scaling_load_test().await {
         panic!("{error:#}");
@@ -101,7 +104,10 @@ async fn load_test_scaling_scores() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "manual load test; run with -- --ignored --nocapture"]
+#[cfg_attr(
+    not(feature = "load_test"),
+    ignore = "manual load test; run with -- --ignored --nocapture"
+)]
 async fn load_test_api_surface_scores() {
     if let Err(error) = scenarios::run_api_surface_load_test().await {
         panic!("{error:#}");
@@ -109,7 +115,10 @@ async fn load_test_api_surface_scores() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "manual load test; run with -- --ignored --nocapture"]
+#[cfg_attr(
+    not(feature = "load_test"),
+    ignore = "manual load test; run with -- --ignored --nocapture"
+)]
 async fn load_test_reconnect_storm_scores() {
     if let Err(error) = scenarios::run_reconnect_storm_load_test().await {
         panic!("{error:#}");
@@ -117,7 +126,10 @@ async fn load_test_reconnect_storm_scores() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "manual large-fleet load test; run with -- --ignored --nocapture"]
+#[cfg_attr(
+    not(feature = "load_test"),
+    ignore = "manual large-fleet load test; run with -- --ignored --nocapture"
+)]
 async fn load_test_large_fleet_scores() {
     if let Err(error) = large_scale::run_large_fleet_load_test().await {
         panic!("{error:#}");
@@ -125,7 +137,10 @@ async fn load_test_large_fleet_scores() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "manual dashboard fanout load test; run with -- --ignored --nocapture"]
+#[cfg_attr(
+    not(feature = "load_test"),
+    ignore = "manual dashboard fanout load test; run with -- --ignored --nocapture"
+)]
 async fn load_test_dashboard_fanout_scores() {
     if let Err(error) = large_scale::run_dashboard_fanout_load_test().await {
         panic!("{error:#}");
@@ -133,7 +148,10 @@ async fn load_test_dashboard_fanout_scores() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "manual history pressure load test; run with -- --ignored --nocapture"]
+#[cfg_attr(
+    not(feature = "load_test"),
+    ignore = "manual history pressure load test; run with -- --ignored --nocapture"
+)]
 async fn load_test_history_pressure_scores() {
     if let Err(error) = large_scale::run_history_pressure_load_test().await {
         panic!("{error:#}");
@@ -141,7 +159,10 @@ async fn load_test_history_pressure_scores() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "manual large payload load test; run with -- --ignored --nocapture"]
+#[cfg_attr(
+    not(feature = "load_test"),
+    ignore = "manual large payload load test; run with -- --ignored --nocapture"
+)]
 async fn load_test_payload_size_scores() {
     if let Err(error) = large_scale::run_payload_size_load_test().await {
         panic!("{error:#}");
@@ -149,7 +170,10 @@ async fn load_test_payload_size_scores() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "manual concurrent read+write load test; run with -- --ignored --nocapture"]
+#[cfg_attr(
+    not(feature = "load_test"),
+    ignore = "manual concurrent read+write load test; run with -- --ignored --nocapture"
+)]
 async fn load_test_concurrent_read_write_scores() {
     if let Err(error) = large_scale::run_concurrent_read_write_load_test().await {
         panic!("{error:#}");

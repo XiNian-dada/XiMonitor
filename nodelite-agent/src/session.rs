@@ -19,10 +19,9 @@ use tracing::{info, warn};
 
 use crate::collector::HostCollector;
 use crate::config_io::update_token_in_config;
-use crate::support::shutdown_signal;
 
 /// Agent 本地最多暂存的待上报日志条数。超出后丢弃最旧项,避免断线期间内存无限增长。
-pub(crate) const MAX_PENDING_AGENT_LOGS: usize = 256;
+const MAX_PENDING_AGENT_LOGS: usize = 256;
 /// 单次推送到服务端的最大日志条数,控制消息体积。
 const MAX_AGENT_LOG_BATCH: usize = 32;
 /// 单条日志消息的最大字节数,避免异常长错误串撑爆 WebSocket 消息。
@@ -36,8 +35,9 @@ const TOKEN_EXPIRED_SHORT_RETRY_DELAYS: [Duration; 3] = [
 const TOKEN_EXPIRED_LONG_RECONNECT_DELAY: Duration = Duration::from_secs(3600);
 
 #[derive(Debug)]
-pub(crate) struct SessionError {
-    pub(crate) established_session: bool,
+pub struct SessionError {
+    /// 是否曾经成功完成认证。外部测试据此区分"连接前失败"与"连接后断开"。
+    pub established_session: bool,
     pub(crate) token_expired: bool,
     pub(crate) source: anyhow::Error,
 }
@@ -48,7 +48,7 @@ type AgentWsSender = futures::stream::SplitSink<
 >;
 
 #[derive(Default)]
-pub(crate) struct AgentLogBuffer {
+pub struct AgentLogBuffer {
     entries: VecDeque<AgentLogEntry>,
 }
 
@@ -94,16 +94,21 @@ impl AgentLogBuffer {
     }
 }
 
-/// 无限重连循环:无论会话以何种方式结束,都会按指数退避重试。
-pub(crate) async fn run_forever(
+pub async fn run_forever<F>(
     mut config: AgentConfig,
     mut collector: HostCollector,
     identity: nodelite_proto::NodeIdentity,
     config_path: PathBuf,
     mut log_buffer: AgentLogBuffer,
-) -> Result<()> {
+    shutdown: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = ()> + Send,
+{
     let mut reconnect_attempt = 0_u32;
     let mut token_expired_attempt = 0_u32;
+
+    tokio::pin!(shutdown);
 
     loop {
         let next = async {
@@ -165,7 +170,7 @@ pub(crate) async fn run_forever(
 
         tokio::select! {
             _ = next => continue,
-            _ = shutdown_signal() => {
+            _ = &mut shutdown => {
                 info!("agent shutting down");
                 return Ok(());
             }
@@ -174,7 +179,7 @@ pub(crate) async fn run_forever(
 }
 
 /// 与 Server 进行一次完整的 WebSocket 会话。
-pub(crate) async fn run_session(
+pub async fn run_session(
     config: &mut AgentConfig,
     collector: &mut HostCollector,
     identity: &nodelite_proto::NodeIdentity,

@@ -5,6 +5,7 @@ pub(crate) use anyhow::Result;
 pub(crate) use futures::future::try_join_all;
 mod browser_websocket;
 mod concurrent_nodes;
+mod e2e;
 mod failure_recovery;
 mod metrics_collection;
 mod server_agent_handshake;
