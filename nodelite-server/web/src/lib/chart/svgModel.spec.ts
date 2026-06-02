@@ -96,6 +96,6 @@ describe('buildMultiAreaChart', () => {
       ],
       { ...opts, width: 380 },
     );
-    expect(model.padLeft).toBe(70);
+    expect(model.padLeft).toBe(62);
   });
 });

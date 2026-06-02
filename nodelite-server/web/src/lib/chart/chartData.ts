@@ -41,7 +41,7 @@ export function chartBounds(values: number[], clipSpikes = false): ChartBounds {
   let displayMax = actualMax;
   let clipped = false;
   if (clipSpikes && values.length >= 12) {
-    const clippedMax = quantile(values, spikeClipRatio(values.length));
+    const clippedMax = spikeClipMax(values);
     if (clippedMax != null && clippedMax > actualMin && clippedMax < actualMax) {
       displayMax = clippedMax;
       clipped = true;
@@ -52,6 +52,28 @@ export function chartBounds(values: number[], clipSpikes = false): ChartBounds {
 
 function spikeClipRatio(sampleCount: number): number {
   return sampleCount < 100 ? 0.95 : 0.98;
+}
+
+function robustSpikeClipRatio(sampleCount: number): number {
+  return sampleCount < 100 ? 0.9 : 0.95;
+}
+
+function spikeClipMax(values: number[]): number | null {
+  const primaryMax = quantile(values, spikeClipRatio(values.length));
+  const robustMax = quantile(values, robustSpikeClipRatio(values.length));
+  if (primaryMax == null || robustMax == null) return primaryMax;
+  if (robustMax > 0 && primaryMax > robustMax * 8) {
+    return robustMax;
+  }
+  return primaryMax;
+}
+
+function niceCeil(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return value;
+  const exponent = 10 ** Math.floor(Math.log10(value));
+  const normalized = value / exponent;
+  const step = [1, 1.25, 2, 2.5, 4, 5, 8, 10].find((candidate) => normalized <= candidate) ?? 10;
+  return step * exponent;
 }
 
 export function chartDisplayBounds(
@@ -67,6 +89,9 @@ export function chartDisplayBounds(
   }
   if (bounds.displayMax <= bounds.displayMin) {
     bounds.displayMax = bounds.displayMin + 1;
+  }
+  if (bounds.displayMin <= 0 && bounds.displayMax > 0) {
+    bounds.displayMax = niceCeil(bounds.displayMax);
   }
   return bounds;
 }

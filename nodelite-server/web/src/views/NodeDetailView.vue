@@ -162,7 +162,7 @@ const modalConfig = computed(() => {
     case 'cpu':
       return { title: t('node.cpu_usage'), points: data.cpuPts, valueKind: 'percent' as const, color: 'var(--chart-cpu)' };
     case 'memory':
-      return { title: t('node.memory_usage'), points: data.memPts, valueKind: 'percent' as const, color: 'var(--chart-memory)' };
+      return { title: t('node.memory_usage'), points: data.memPts, valueKind: 'percent' as const, color: 'var(--chart-memory)', maxValue: 100 };
     case 'latency':
       return { title: t('node.latency_history'), points: data.rttPts, valueKind: 'latency' as const, color: 'var(--chart-latency)' };
     case 'network':

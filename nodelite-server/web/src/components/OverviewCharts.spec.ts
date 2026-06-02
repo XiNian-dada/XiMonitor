@@ -87,4 +87,19 @@ describe('OverviewCharts', () => {
     expect(wrapper.find('[data-test="now-memory"]').text()).toBe('25%');
     expect(wrapper.find('[data-test="now-rtt"]').text()).toBe('7.0 ms');
   });
+
+  it('keeps memory charts on a full 100 percent scale', () => {
+    const wrapper = mount(OverviewCharts, {
+      props: {
+        node: makeNodeStatus(),
+        history: [
+          hp('2026-05-29T00:00:00Z', { memory_used_percent: 74 }),
+          hp('2026-05-29T00:01:00Z', { memory_used_percent: 76 }),
+        ],
+      },
+      global: { plugins: [getI18n()] },
+    });
+    const charts = wrapper.findAll('[data-test="metric-chart"]');
+    expect(charts[1]?.text()).toContain('100%');
+  });
 });

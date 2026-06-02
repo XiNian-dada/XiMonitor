@@ -30,9 +30,9 @@ export function chartPadLeft(kind: ChartValueKind, width?: number): number {
   const isMedium = Number.isFinite(measuredWidth) && measuredWidth < 520;
 
   if (kind === 'rate') {
-    if (isCompact) return 70;
-    if (isMedium) return 76;
-    return 86;
+    if (isCompact) return 62;
+    if (isMedium) return 68;
+    return 78;
   }
   if (kind === 'latency') {
     if (isCompact) return 58;

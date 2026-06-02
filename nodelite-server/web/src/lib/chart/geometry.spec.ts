@@ -25,22 +25,22 @@ describe('chartY', () => {
 });
 
 describe('chartPadLeft', () => {
-  it('keeps the legacy spacing when width is unknown or roomy', () => {
-    expect(chartPadLeft('rate')).toBe(86);
+  it('keeps enough spacing when width is unknown or roomy', () => {
+    expect(chartPadLeft('rate')).toBe(78);
     expect(chartPadLeft('latency')).toBe(70);
     expect(chartPadLeft('percent')).toBe(62);
     expect(chartPadLeft('number')).toBe(62);
   });
 
   it('uses compact spacing in narrow metric cards', () => {
-    expect(chartPadLeft('rate', 380)).toBe(70);
+    expect(chartPadLeft('rate', 380)).toBe(62);
     expect(chartPadLeft('latency', 380)).toBe(58);
     expect(chartPadLeft('percent', 380)).toBe(46);
     expect(chartPadLeft('number', 380)).toBe(46);
   });
 
   it('uses middle spacing before returning to roomy chart padding', () => {
-    expect(chartPadLeft('rate', 460)).toBe(76);
+    expect(chartPadLeft('rate', 460)).toBe(68);
     expect(chartPadLeft('latency', 460)).toBe(62);
     expect(chartPadLeft('percent', 460)).toBe(50);
   });

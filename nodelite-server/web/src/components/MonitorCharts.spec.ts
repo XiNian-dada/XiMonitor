@@ -82,6 +82,12 @@ describe('MonitorCharts', () => {
     expect(wrapper.findAll('[data-test="metric-chart"]')).toHaveLength(4);
   });
 
+  it('keeps memory charts on a full 100 percent scale', () => {
+    const wrapper = mountMonitor();
+    const charts = wrapper.findAll('[data-test="metric-chart"]');
+    expect(charts[1]?.text()).toContain('100%');
+  });
+
   it('emits selectPreset when a preset is clicked', async () => {
     const wrapper = mountMonitor();
     await wrapper.find('[data-test="preset-last_7d"]').trigger('click');

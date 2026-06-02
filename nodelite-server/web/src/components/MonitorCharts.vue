@@ -38,7 +38,7 @@ const charts = computed(() => [
   {
     metric: 'memory' as const,
     title: t('node.memory_usage'),
-    chartProps: { points: data.value.memPts, valueKind: 'percent' as const, color: 'var(--chart-memory)', label: t('node.memory_usage') },
+    chartProps: { points: data.value.memPts, valueKind: 'percent' as const, color: 'var(--chart-memory)', label: t('node.memory_usage'), maxValue: 100 },
   },
   {
     metric: 'network' as const,
