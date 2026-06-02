@@ -11,4 +11,6 @@ pub(crate) use super::{
 #[path = "../lib_tests.rs"]
 mod legacy;
 
+mod auth_runtime_tests;
+mod route_surface_tests;
 mod support;
