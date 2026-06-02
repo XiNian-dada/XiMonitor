@@ -24,6 +24,7 @@ import { useNodeStatusStore } from '@/stores/nodeStatus';
 import { useDetailHistoryStore } from '@/stores/detailHistory';
 import { useMonitorHistoryStore } from '@/stores/monitorHistory';
 import { useNodeLogsStore } from '@/stores/nodeLogs';
+import { ApiError } from '@/api/client';
 
 const NODE_DETAIL_REFRESH_MS = 5000;
 
@@ -75,6 +76,16 @@ const title = computed(
 const ip = computed(() => (node.value ? ipFromNode(node.value) : null));
 const location = computed(() => (node.value ? locationFromNode(node.value) : null));
 const uptime = computed(() => uptimeParts(node.value?.snapshot?.uptime_secs));
+
+// Render not-found state only when the API returned 404. Other errors (500,
+// network failure, JSON parse error) should show a generic error/retry state.
+const notFound = computed(
+  () => store.error instanceof ApiError && store.error.status === 404 && store.data === null,
+);
+// Generic error state for non-404 failures (network, 500, etc).
+const loadError = computed(
+  () => store.error !== null && store.data === null && !notFound.value,
+);
 
 // Tabs that render the overview-history charts (overview/network).
 const historyNeeded = computed(
@@ -133,8 +144,10 @@ usePolling(() => {
 
 // --- Monitor zoom modal ---
 const modalMetric = ref<MonitorMetric | null>(null);
-function openZoom(metric: MonitorMetric): void {
+const modalClipSpikes = ref(true);
+function openZoom(metric: MonitorMetric, clipSpikes = true): void {
   modalMetric.value = metric;
+  modalClipSpikes.value = clipSpikes;
 }
 function closeZoom(): void {
   modalMetric.value = null;
@@ -149,16 +162,36 @@ const modalConfig = computed(() => {
   const data = buildChartData(monitorStore.points);
   switch (metric) {
     case 'cpu':
-      return { title: t('node.cpu_usage'), points: data.cpuPts, valueKind: 'percent' as const, color: 'var(--chart-cpu)' };
+      return {
+        title: t('node.cpu_usage'),
+        points: data.cpuPts,
+        valueKind: 'percent' as const,
+        color: 'var(--chart-cpu)',
+        clipSpikes: modalClipSpikes.value,
+      };
     case 'memory':
-      return { title: t('node.memory_usage'), points: data.memPts, valueKind: 'percent' as const, color: 'var(--chart-memory)' };
+      return {
+        title: t('node.memory_usage'),
+        points: data.memPts,
+        valueKind: 'percent' as const,
+        color: 'var(--chart-memory)',
+        maxValue: 100,
+        clipSpikes: modalClipSpikes.value,
+      };
     case 'latency':
-      return { title: t('node.latency_history'), points: data.rttPts, valueKind: 'latency' as const, color: 'var(--chart-latency)' };
+      return {
+        title: t('node.latency_history'),
+        points: data.rttPts,
+        valueKind: 'latency' as const,
+        color: 'var(--chart-latency)',
+        clipSpikes: modalClipSpikes.value,
+      };
     case 'network':
       return {
         title: t('node.network_traffic'),
         series: networkSeries(data, t('index.node.download'), t('index.node.upload')),
         valueKind: 'rate' as const,
+        clipSpikes: modalClipSpikes.value,
       };
   }
   return null;
@@ -168,7 +201,8 @@ const modalConfig = computed(() => {
 <template>
   <AppLayout>
     <template #title>
-      <div class="node-title" data-test="node-detail-view">
+      <!-- Hide header when showing not-found or generic error state -->
+      <div v-if="!notFound && !loadError" class="node-title" data-test="node-detail-view">
         <h1 class="node-title__name">{{ title }}</h1>
         <span class="badge" :class="status" data-test="node-status-badge">
           {{ $t(statusLabelKey) }}
@@ -183,21 +217,46 @@ const modalConfig = computed(() => {
     </template>
 
     <div class="node-detail">
-      <nav class="tabs" data-test="node-tabs">
-        <button
-          v-for="tab in TABS"
-          :key="tab"
-          type="button"
-          class="tab-button"
-          :class="{ active: activeTab === tab }"
-          :data-test="`tab-${tab}`"
-          @click="selectTab(tab)"
-        >
-          {{ $t(`node.tabs.${tab}`) }}
-        </button>
-      </nav>
+      <!-- Not-found state: API returned 404 -->
+      <div v-if="notFound" class="error-state" data-test="node-not-found">
+        <div class="error-state__icon">⚠️</div>
+        <h2 class="error-state__title">{{ $t('node.not_found.title') }}</h2>
+        <p class="error-state__message">
+          {{ $t('node.not_found.message', { nodeId: nodeId }) }}
+        </p>
+        <RouterLink to="/" class="error-state__link">
+          {{ $t('node.not_found.back_to_dashboard') }}
+        </RouterLink>
+      </div>
 
-      <section class="tab-pane" :data-pane="activeTab" data-test="node-tab-pane">
+      <!-- Generic error state: network failure, 500, etc -->
+      <div v-else-if="loadError" class="error-state" data-test="node-load-error">
+        <div class="error-state__icon">⚠️</div>
+        <h2 class="error-state__title">{{ $t('node.load_error.title') }}</h2>
+        <p class="error-state__message">
+          {{ $t('node.load_error.message') }}
+        </p>
+        <button type="button" class="error-state__button" @click="store.refresh()">
+          {{ $t('node.load_error.retry') }}
+        </button>
+      </div>
+
+      <template v-else>
+        <nav class="tabs" data-test="node-tabs">
+          <button
+            v-for="tab in TABS"
+            :key="tab"
+            type="button"
+            class="tab-button"
+            :class="{ active: activeTab === tab }"
+            :data-test="`tab-${tab}`"
+            @click="selectTab(tab)"
+          >
+            {{ $t(`node.tabs.${tab}`) }}
+          </button>
+        </nav>
+
+        <section class="tab-pane" :data-pane="activeTab" data-test="node-tab-pane">
         <template v-if="activeTab === 'overview'">
           <div class="overview-grid">
             <NodeInfoPanel :node="node" />
@@ -254,6 +313,7 @@ const modalConfig = computed(() => {
 
         <NodeSettingsPanel v-else-if="activeTab === 'settings'" :node-id="nodeId" />
       </section>
+      </template>
     </div>
 
     <ChartModal v-if="modalConfig" v-bind="modalConfig" @close="closeZoom" />
@@ -381,6 +441,65 @@ const modalConfig = computed(() => {
 .net-stat small {
   color: var(--text-muted);
   font-size: 12px;
+}
+.error-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 80px 20px;
+  text-align: center;
+  min-height: 400px;
+}
+.error-state__icon {
+  font-size: 64px;
+  margin-bottom: 20px;
+  opacity: 0.6;
+}
+.error-state__title {
+  margin: 0 0 12px;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.error-state__message {
+  margin: 0 0 24px;
+  font-size: 14px;
+  color: var(--text-muted);
+  max-width: 400px;
+}
+.error-state__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px;
+  background: var(--accent-blue);
+  color: white;
+  border-radius: 8px;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+  transition: opacity 0.2s;
+}
+.error-state__link:hover {
+  opacity: 0.9;
+}
+.error-state__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px;
+  background: var(--accent-blue);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.error-state__button:hover {
+  opacity: 0.9;
 }
 @media (max-width: 880px) {
   .overview-grid {

@@ -35,7 +35,7 @@ const props = withDefaults(
     valueKind: 'number',
     color: 'var(--accent-blue)',
     label: '',
-    clipSpikes: false,
+    clipSpikes: true,
     height: 180,
   },
 );
@@ -46,6 +46,13 @@ const containerRef = ref<HTMLElement | null>(null);
 const gradId = `metric-grad-${useId()}`;
 
 const isMulti = computed(() => Array.isArray(props.series));
+
+function axisTimeLabel(ts: number): string {
+  return new Date(ts).toLocaleTimeString(locale.value, {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
 
 const { model, hover, onPointerMove, onPointerLeave } = useChart(
   containerRef,
@@ -124,6 +131,22 @@ const { model, hover, onPointerMove, onPointerLeave } = useChart(
               {{ g.label }}
             </text>
           </template>
+        </g>
+
+        <g v-if="model.timeTicks.length > 0" class="metric-chart__x-axis">
+          <text
+            v-for="tick in model.timeTicks"
+            :key="tick.ts"
+            :x="tick.x"
+            :y="model.height - 8"
+            text-anchor="middle"
+            fill="currentColor"
+            opacity="0.54"
+            font-size="10"
+            data-test="metric-chart-x-tick"
+          >
+            {{ axisTimeLabel(tick.ts) }}
+          </text>
         </g>
 
         <template v-for="(s, i) in model.series" :key="i">
@@ -214,21 +237,29 @@ const { model, hover, onPointerMove, onPointerLeave } = useChart(
   color: var(--text-muted);
   font-size: 13px;
 }
+.metric-chart__x-axis {
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
 .chart-tooltip {
   position: absolute;
   pointer-events: none;
   background: var(--bg-elevated);
   border: 1px solid var(--border-soft);
-  border-radius: 8px;
-  padding: 8px 10px;
-  font-size: 12px;
-  min-width: 120px;
+  border-radius: 12px;
+  padding: 9px 11px;
+  font-size: 11px;
+  line-height: 1.45;
+  min-width: 138px;
+  max-width: 220px;
   z-index: 5;
   color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
 }
 .chart-tooltip__time {
   color: var(--text-muted);
-  margin-bottom: 4px;
+  margin-bottom: 5px;
+  white-space: nowrap;
 }
 .chart-tooltip__row {
   display: flex;
@@ -236,11 +267,23 @@ const { model, hover, onPointerMove, onPointerLeave } = useChart(
   justify-content: space-between;
   gap: 12px;
 }
+.chart-tooltip__row > span {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  white-space: nowrap;
+}
+.chart-tooltip__row strong {
+  flex: 0 0 auto;
+  text-align: right;
+  white-space: nowrap;
+}
 .chart-tooltip__swatch {
   display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
-  margin-right: 4px;
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 5px;
 }
 </style>

@@ -35,6 +35,9 @@ pub(crate) struct AppState {
     pub(crate) registry: NodeRegistry,
     pub(crate) shared: SharedState,
     pub(crate) ws_admission: WsAdmissionController,
+    /// 浏览器 WebSocket(`/ws/browser`)的并发准入控制器。与 `ws_admission`
+    /// 同型但实例独立,使浏览器连接与 agent 连接各自计数、互不挤占配额。
+    pub(crate) browser_ws_admission: WsAdmissionController,
     pub(crate) readonly_auth: Arc<RwLock<ReadonlyRouteAuth>>,
     pub(crate) alerting: Arc<RwLock<AlertingConfig>>,
     pub(crate) two_factor_sessions: TwoFactorSessions,
@@ -121,6 +124,7 @@ impl AppState {
             registry,
             shared: SharedState::new(config.clone()),
             ws_admission: WsAdmissionController::new(&config.ws),
+            browser_ws_admission: WsAdmissionController::new(&config.ws),
             readonly_auth: Arc::new(RwLock::new(ReadonlyRouteAuth::from_config(
                 config.readonly_auth.clone(),
             ))),

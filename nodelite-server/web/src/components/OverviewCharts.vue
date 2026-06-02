@@ -74,6 +74,7 @@ const netSeries = computed(() =>
         color="var(--chart-memory)"
         :label="t('node.memory_usage')"
         :min-value="0"
+        :max-value="100"
       />
     </article>
 

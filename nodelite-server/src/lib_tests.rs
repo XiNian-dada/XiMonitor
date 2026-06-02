@@ -26,10 +26,9 @@ use crate::admission::{
 use crate::audit::{AuditEvent, AuditEventType, AuditQuery, NewAuditEvent};
 use crate::auth::{ReadonlyRouteAuth, TwoFactorSessions};
 use crate::handlers::{
-    audit_log, bootstrap, brand_logo_dark_asset, brand_logo_light_asset, healthz, index,
-    install_agent_script, install_bootstrap, is_well_formed_install_token, logout_and_reauth,
-    node_detail, node_history, node_logs, node_status, nodes, overview, readyz,
-    require_readonly_auth, ui_i18n_asset, verify_2fa_page,
+    audit_log, bootstrap, healthz, index, install_agent_script, install_bootstrap,
+    is_well_formed_install_token, logout_and_reauth, node_detail, node_history, node_logs,
+    node_status, nodes, overview, readyz, require_readonly_auth, static_asset, verify_2fa_page,
 };
 use crate::registry::{IssueNodeRequest, issue_node};
 use crate::sanitize::{
@@ -38,7 +37,6 @@ use crate::sanitize::{
     sanitize_snapshot, should_disconnect_for_metric_anomalies, update_metric_anomaly_window,
 };
 use crate::test_support::{TEST_BASIC_AUTH_HEADER, test_server_config, test_ws_config};
-use crate::ui::{index_page_csp, verify_2fa_page_csp};
 use crate::ws::ws_handler;
 use nodelite_proto::{NodeSnapshot, ServerConfig, WsConfig};
 use tower_http::trace::TraceLayer;
@@ -74,9 +72,7 @@ fn router_builds_with_v08_path_syntax() {
     let _app: Router = Router::new()
         .route("/", get(index))
         .route("/nodes/{node_id}", get(node_detail))
-        .route("/assets/brand-logo-dark.webp", get(brand_logo_dark_asset))
-        .route("/assets/brand-logo-light.webp", get(brand_logo_light_asset))
-        .route("/assets/ui-i18n.json", get(ui_i18n_asset))
+        .route("/assets/{*path}", get(static_asset))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/install/install-agent.sh", get(install_agent_script))
@@ -375,6 +371,62 @@ fn router_compresses_text_assets_but_not_webp() {
 }
 
 #[test]
+fn spa_history_mode_routes_serve_index_shell() {
+    let runtime = Runtime::new().expect("runtime should build");
+    runtime.block_on(async {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic enough")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("nodelite-spa-routes-test-{unique}"));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let registry_path = temp_dir.join("server.json");
+        let mut config = test_server_config(
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
+            "https://monitor.example.com".to_string(),
+            registry_path,
+            temp_dir.join("history.sqlite3"),
+            temp_dir.join("snapshot.json"),
+        );
+        config.readonly_auth = None;
+        config.ws = test_ws_config(32, 8);
+        let state = AppState::test_fixture(config.into(), Arc::new(temp_dir.join("server.toml")))
+            .await
+            .expect("state fixture should build");
+        let app = crate::startup::build_router(state.clone());
+
+        // Every history-mode route in web/src/router/index.ts must return the SPA
+        // shell so deep links / refresh boot Vue instead of 404ing on the backend.
+        for path in ["/", "/nodes/osaka-01", "/settings", "/account", "/alerts"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("response should be produced");
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{path} should serve the SPA shell"
+            );
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE),
+                Some(&HeaderValue::from_static("text/html; charset=utf-8")),
+                "{path} should return index.html",
+            );
+        }
+
+        state.history.shutdown().await;
+        state.audit_log.shutdown().await;
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    });
+}
+
+#[test]
 fn protected_routes_attach_security_headers() {
     let runtime = Runtime::new().expect("runtime should build");
     runtime.block_on(async {
@@ -417,9 +469,26 @@ fn protected_routes_attach_security_headers() {
             .expect("response should be produced");
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get(header::CONTENT_SECURITY_POLICY),
-            Some(&header::HeaderValue::from_static(index_page_csp(),)),
+        // `/` serves the SPA shell, whose CSP pins index.html's inline bootstrap
+        // shim by sha256 under an explicit `script-src 'self'`, while keeping the
+        // rest of the strict policy (no inline styles).
+        let index_csp = response
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .expect("spa index should set a CSP")
+            .to_str()
+            .expect("CSP should be valid ascii");
+        assert!(
+            index_csp.contains("script-src 'self' 'sha256-"),
+            "spa index CSP should pin its inline shim: {index_csp}"
+        );
+        assert!(
+            !index_csp.contains("'unsafe-inline'"),
+            "spa index CSP must not relax to unsafe-inline: {index_csp}"
+        );
+        assert!(
+            index_csp.contains("frame-ancestors 'none'"),
+            "spa index CSP should retain the strict directives: {index_csp}"
         );
         assert_security_headers(response.headers());
 
@@ -487,11 +556,21 @@ fn public_auth_routes_attach_security_headers() {
             .await
             .expect("response should be produced");
         assert_eq!(verify_response.status(), StatusCode::OK);
-        assert_eq!(
-            verify_response
-                .headers()
-                .get(header::CONTENT_SECURITY_POLICY),
-            Some(&header::HeaderValue::from_static(verify_2fa_page_csp(),)),
+        // The standalone 2FA page carries inline <script>/<style>, so it serves a
+        // page-specific CSP that pins them by sha256 (not the generic protected CSP).
+        let verify_csp = verify_response
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .expect("verify-2fa should set a CSP")
+            .to_str()
+            .expect("CSP should be valid ascii");
+        assert!(
+            verify_csp.contains("script-src 'self' 'sha256-"),
+            "verify-2fa CSP should pin its inline script: {verify_csp}"
+        );
+        assert!(
+            verify_csp.contains("style-src 'self' 'unsafe-inline'"),
+            "verify-2fa CSP should allow its inline styles: {verify_csp}"
         );
         assert_security_headers(verify_response.headers());
 
@@ -610,6 +689,130 @@ fn readonly_auth_route_accepts_valid_basic_auth() {
             .oneshot(protected_request(
                 "GET",
                 "/api/overview",
+                Some(TEST_BASIC_AUTH_HEADER),
+                SocketAddr::V4(SocketAddrV4::new(
+                    "198.51.100.24".parse().expect("ip"),
+                    51234,
+                )),
+            ))
+            .await
+            .expect("response should be produced");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    });
+}
+
+/// 构造一个开启/关闭 2FA 的受保护认证测试状态,返回 (state, temp_dir)。
+async fn two_factor_auth_test_state(label: &str, enable_2fa: bool) -> (AppState, PathBuf) {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be monotonic enough")
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!("nodelite-{label}-{unique}"));
+    std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+    let mut config = test_server_config(
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)),
+        "https://monitor.example.com".to_string(),
+        temp_dir.join("server.json"),
+        temp_dir.join("history.sqlite3"),
+        temp_dir.join("snapshot.json"),
+    );
+    config.readonly_auth = Some(nodelite_proto::ReadonlyAuthConfig {
+        username: "viewer".to_string(),
+        password: "secret".to_string(),
+        enable_2fa,
+        totp_secret: enable_2fa.then(|| "JBSWY3DPEHPK3PXP".to_string()),
+    });
+    let state = AppState::test_fixture(config.into(), Arc::new(temp_dir.join("server.toml")))
+        .await
+        .expect("state fixture should build");
+    (state, temp_dir)
+}
+
+#[test]
+fn websocket_upgrade_requiring_two_factor_returns_401_json_not_redirect() {
+    let runtime = Runtime::new().expect("runtime should build");
+    runtime.block_on(async {
+        let (state, temp_dir) = two_factor_auth_test_state("ws-2fa-401", true).await;
+        let app: Router = Router::new()
+            .route("/ws/browser", get(protected_ok))
+            .route_layer(from_fn_with_state(state.clone(), require_readonly_auth))
+            .with_state(state);
+        let response = app
+            .oneshot(ws_upgrade_request(
+                "/ws/browser",
+                Some(TEST_BASIC_AUTH_HEADER),
+                SocketAddr::V4(SocketAddrV4::new(
+                    "198.51.100.24".parse().expect("ip"),
+                    51234,
+                )),
+            ))
+            .await
+            .expect("response should be produced");
+
+        // 浏览器 WS 握手无法跟随 302,因此必须是 401 + JSON,且不带 Location 头。
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(response.headers().get(header::LOCATION).is_none());
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body should read");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(json["ok"], serde_json::Value::Bool(false));
+        assert_eq!(json["message"], "two_factor_required");
+        assert_eq!(json["endpoint"], "/verify-2fa");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    });
+}
+
+#[test]
+fn http_request_requiring_two_factor_still_redirects() {
+    let runtime = Runtime::new().expect("runtime should build");
+    runtime.block_on(async {
+        let (state, temp_dir) = two_factor_auth_test_state("http-2fa-302", true).await;
+        let app: Router = Router::new()
+            .route("/api/overview", get(protected_ok))
+            .route_layer(from_fn_with_state(state.clone(), require_readonly_auth))
+            .with_state(state);
+        // 没有 Upgrade 头的普通 HTTP 请求:行为不变,仍是 302 → /verify-2fa。
+        let response = app
+            .oneshot(protected_request(
+                "GET",
+                "/api/overview",
+                Some(TEST_BASIC_AUTH_HEADER),
+                SocketAddr::V4(SocketAddrV4::new(
+                    "198.51.100.24".parse().expect("ip"),
+                    51234,
+                )),
+            ))
+            .await
+            .expect("response should be produced");
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .expect("location header"),
+            "/verify-2fa"
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    });
+}
+
+#[test]
+fn websocket_upgrade_without_two_factor_passes_through() {
+    let runtime = Runtime::new().expect("runtime should build");
+    runtime.block_on(async {
+        let (state, temp_dir) = two_factor_auth_test_state("ws-no-2fa-pass", false).await;
+        let app: Router = Router::new()
+            .route("/ws/browser", get(protected_ok))
+            .route_layer(from_fn_with_state(state.clone(), require_readonly_auth))
+            .with_state(state);
+        // 2FA 未开启时,带 Upgrade 头的请求应正常放行到 handler(不受 WS 检测影响)。
+        let response = app
+            .oneshot(ws_upgrade_request(
+                "/ws/browser",
                 Some(TEST_BASIC_AUTH_HEADER),
                 SocketAddr::V4(SocketAddrV4::new(
                     "198.51.100.24".parse().expect("ip"),
@@ -1468,6 +1671,25 @@ fn protected_request(
     peer_addr: SocketAddr,
 ) -> Request<Body> {
     let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(auth_header) = auth_header {
+        builder = builder.header(header::AUTHORIZATION, auth_header);
+    }
+    let mut request = builder.body(Body::empty()).expect("request should build");
+    request.extensions_mut().insert(ConnectInfo(peer_addr));
+    request
+}
+
+/// 构造一个带 `Upgrade: websocket` 头的 GET 请求,模拟浏览器 WebSocket 握手。
+fn ws_upgrade_request(
+    uri: &str,
+    auth_header: Option<&str>,
+    peer_addr: SocketAddr,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header(header::CONNECTION, "Upgrade")
+        .header(header::UPGRADE, "websocket");
     if let Some(auth_header) = auth_header {
         builder = builder.header(header::AUTHORIZATION, auth_header);
     }

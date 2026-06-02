@@ -73,4 +73,107 @@ describe('useNodesStore', () => {
     await first;
     expect(mockListNodes).toHaveBeenCalledTimes(1);
   });
+
+  describe('incremental updates (WS)', () => {
+    it('applyServerState replaces the entire Map', () => {
+      const store = useNodesStore();
+      const a = makeNode({ identity: { node_id: 'a', node_label: 'A', hostname: 'a', tags: [] } });
+      const b = makeNode({ identity: { node_id: 'b', node_label: 'B', hostname: 'b', tags: [] } });
+
+      store.applyServerState([a], '2026-06-01T12:00:00Z');
+      expect(store.nodes).toEqual([a]);
+
+      store.applyServerState([b], '2026-06-01T12:01:00Z');
+      expect(store.nodes).toEqual([b]);
+    });
+
+    it('upsertNode merges into the Map', () => {
+      const store = useNodesStore();
+      const a = makeNode({ identity: { node_id: 'a', node_label: 'A', hostname: 'a', tags: [] } });
+      const b = makeNode({ identity: { node_id: 'b', node_label: 'B', hostname: 'b', tags: [] } });
+
+      store.applyServerState([a], '2026-06-01T12:00:00Z');
+      store.upsertNode(b, '2026-06-01T12:01:00Z');
+
+      expect(store.nodes).toHaveLength(2);
+      expect(store.nodes).toContainEqual(a);
+      expect(store.nodes).toContainEqual(b);
+    });
+
+    it('removeNode deletes from the Map', () => {
+      const store = useNodesStore();
+      const a = makeNode({ identity: { node_id: 'a', node_label: 'A', hostname: 'a', tags: [] } });
+      const b = makeNode({ identity: { node_id: 'b', node_label: 'B', hostname: 'b', tags: [] } });
+
+      store.applyServerState([a, b], '2026-06-01T12:00:00Z');
+      store.removeNode('a', '2026-06-01T12:01:00Z');
+
+      expect(store.nodes).toEqual([b]);
+    });
+
+    it('applyServerState always accepts (no guard)', () => {
+      const store = useNodesStore();
+      const a = makeNode({ identity: { node_id: 'a', node_label: 'A', hostname: 'a', tags: [] } });
+      const b = makeNode({ identity: { node_id: 'b', node_label: 'B', hostname: 'b', tags: [] } });
+
+      store.applyServerState([a], '2026-06-01T12:01:00Z');
+      // Even with older timestamp, InitialState is always accepted
+      store.applyServerState([b], '2026-06-01T12:00:00Z');
+
+      expect(store.nodes).toEqual([b]);
+      expect(store.lastGeneratedAt).toBe('2026-06-01T12:00:00Z');
+    });
+
+    it('rejects stale upsertNode', () => {
+      const store = useNodesStore();
+      const a = makeNode({ identity: { node_id: 'a', node_label: 'A', hostname: 'a', tags: [] } });
+      const aUpdated = makeNode({
+        identity: { node_id: 'a', node_label: 'A Updated', hostname: 'a', tags: [] },
+      });
+
+      store.applyServerState([a], '2026-06-01T12:01:00Z');
+      store.upsertNode(aUpdated, '2026-06-01T12:00:00Z');
+
+      expect(store.nodes[0]?.identity.node_label).toBe('A');
+    });
+
+    it('rejects stale removeNode', () => {
+      const store = useNodesStore();
+      const a = makeNode({ identity: { node_id: 'a', node_label: 'A', hostname: 'a', tags: [] } });
+
+      store.applyServerState([a], '2026-06-01T12:01:00Z');
+      store.removeNode('a', '2026-06-01T12:00:00Z');
+
+      expect(store.nodes).toEqual([a]);
+    });
+
+    it('InitialState resets timestamp guard (Lagged resync)', () => {
+      const store = useNodesStore();
+      const a = makeNode({ identity: { node_id: 'a', node_label: 'A', hostname: 'a', tags: [] } });
+      const b = makeNode({ identity: { node_id: 'b', node_label: 'B', hostname: 'b', tags: [] } });
+      const c = makeNode({ identity: { node_id: 'c', node_label: 'C', hostname: 'c', tags: [] } });
+
+      // Initial state at T1
+      store.applyServerState([a], '2026-06-01T12:01:00Z');
+      expect(store.lastGeneratedAt).toBe('2026-06-01T12:01:00Z');
+
+      // Incremental update at T2
+      store.upsertNode(b, '2026-06-01T12:02:00Z');
+      expect(store.nodes).toHaveLength(2);
+      expect(store.lastGeneratedAt).toBe('2026-06-01T12:02:00Z');
+
+      // Server detects Lagged, re-sends InitialState with same timestamp T2
+      // (idempotent resend — strict < allows this)
+      store.applyServerState([a, b, c], '2026-06-01T12:02:00Z');
+      expect(store.nodes).toHaveLength(3);
+      expect(store.nodes).toContainEqual(a);
+      expect(store.nodes).toContainEqual(b);
+      expect(store.nodes).toContainEqual(c);
+
+      // Subsequent incremental at T3 still works
+      const d = makeNode({ identity: { node_id: 'd', node_label: 'D', hostname: 'd', tags: [] } });
+      store.upsertNode(d, '2026-06-01T12:03:00Z');
+      expect(store.nodes).toHaveLength(4);
+    });
+  });
 });

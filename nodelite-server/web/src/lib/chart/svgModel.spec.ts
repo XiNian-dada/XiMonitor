@@ -24,6 +24,7 @@ describe('buildAreaChart', () => {
     expect(s.points).toHaveLength(3);
     expect(model.grid.length).toBeGreaterThan(0);
     expect(model.grid[0]!.label).toContain('%');
+    expect(model.timeTicks.length).toBeGreaterThanOrEqual(2);
   });
 
   it('positions the first point at padLeft and last at width-padRight', () => {
@@ -31,6 +32,20 @@ describe('buildAreaChart', () => {
     const s = model.series[0]!;
     expect(s.points[0]!.x).toBeCloseTo(model.padLeft, 5);
     expect(s.points[1]!.x).toBeCloseTo(model.width - model.padRight, 5);
+  });
+
+  it('builds time-axis ticks aligned with plotted points', () => {
+    const model = buildAreaChart(pts([10, 50, 90]), opts);
+    expect(model.timeTicks[0]).toMatchObject({ x: model.padLeft, ts: 0 });
+    expect(model.timeTicks.at(-1)).toMatchObject({
+      x: model.width - model.padRight,
+      ts: 120_000,
+    });
+  });
+
+  it('uses compact y-axis padding for narrow cards', () => {
+    const model = buildAreaChart(pts([10, 90]), { ...opts, width: 380 });
+    expect(model.padLeft).toBe(46);
   });
 
   it('carries ts on hover points', () => {
@@ -66,9 +81,21 @@ describe('buildMultiAreaChart', () => {
     );
     expect(model.empty).toBe(false);
     expect(model.series).toHaveLength(2);
+    expect(model.timeTicks.length).toBeGreaterThanOrEqual(2);
     for (const s of model.series) {
       expect(s.line.startsWith('M')).toBe(true);
       expect(s.area).toBeUndefined();
     }
+  });
+
+  it('uses compact rate-axis padding for narrow network cards', () => {
+    const model = buildMultiAreaChart(
+      [
+        { label: 'down', color: 'var(--chart-network-down)', points: pts([100, 200, 300]) },
+        { label: 'up', color: 'var(--chart-network-up)', points: pts([10, 20, 30]) },
+      ],
+      { ...opts, width: 380 },
+    );
+    expect(model.padLeft).toBe(62);
   });
 });

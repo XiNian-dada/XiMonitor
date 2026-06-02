@@ -1,98 +1,24 @@
-use axum::extract::{Path as AxumPath, State};
-use axum::http::header;
-use axum::response::{AppendHeaders, Html, IntoResponse, Response};
+use axum::extract::Path as AxumPath;
+use axum::response::Response;
 
-use crate::AppState;
-use crate::startup::PROTECTED_CACHE_CONTROL;
-use crate::ui::{
-    INDEX_ALERT_SETTINGS_JS, INDEX_SETTINGS_JS, UI_I18N_JSON, index_html, index_page_csp,
-    node_html, node_page_csp, verify_2fa_html, verify_2fa_page_csp,
-};
+use crate::web_assets;
 
-const BRAND_LOGO_LIGHT_WEBP: &[u8] = include_bytes!("../../../logo/brand-logo-light.webp");
-const BRAND_LOGO_DARK_WEBP: &[u8] = include_bytes!("../../../logo/brand-logo-dark.webp");
-
-/// 首页 HTML:把刷新周期等参数注入模板。
-pub(crate) async fn index(State(state): State<AppState>) -> Response {
-    html_page_response(
-        index_page_csp(),
-        index_html(state.shared.config().refresh_interval_secs),
-    )
+/// SPA 首页 — 返回 index.html
+pub(crate) async fn index() -> Response {
+    web_assets::spa_index()
 }
 
-/// 节点详情页 HTML。
-pub(crate) async fn node_detail(
-    State(state): State<AppState>,
-    AxumPath(node_id): AxumPath<String>,
-) -> Response {
-    html_page_response(
-        node_page_csp(),
-        node_html(&node_id, state.shared.config().refresh_interval_secs),
-    )
+/// SPA 节点详情页 — 返回 index.html (路由由前端处理)
+pub(crate) async fn node_detail(AxumPath(_node_id): AxumPath<String>) -> Response {
+    web_assets::spa_index()
 }
 
-/// 把前端 i18n 字典作为静态 JSON 文件提供。
-pub(crate) async fn ui_i18n_asset() -> Response {
-    (
-        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
-        UI_I18N_JSON,
-    )
-        .into_response()
+/// 静态资源 — 从 /assets/* 路径提供
+pub(crate) async fn static_asset(AxumPath(path): AxumPath<String>) -> Response {
+    web_assets::static_asset(&path)
 }
 
-pub(crate) async fn index_settings_js_asset() -> Response {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        INDEX_SETTINGS_JS,
-    )
-        .into_response()
-}
-
-pub(crate) async fn index_alert_settings_js_asset() -> Response {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        INDEX_ALERT_SETTINGS_JS,
-    )
-        .into_response()
-}
-
-pub(crate) async fn brand_logo_light_asset() -> Response {
-    webp_asset(BRAND_LOGO_LIGHT_WEBP)
-}
-
-pub(crate) async fn brand_logo_dark_asset() -> Response {
-    webp_asset(BRAND_LOGO_DARK_WEBP)
-}
-
-/// 2FA 验证页面。
+/// 2FA 验证页面 — 独立后端页面(非 SPA 路由),带按 sha256 锁定内联脚本的专用 CSP。
 pub(crate) async fn verify_2fa_page() -> Response {
-    html_page_response(verify_2fa_page_csp(), verify_2fa_html())
-}
-
-fn webp_asset(bytes: &'static [u8]) -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, "image/webp"),
-            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-        ],
-        bytes,
-    )
-        .into_response()
-}
-
-fn html_page_response<T>(csp: &'static str, body: T) -> Response
-where
-    Html<T>: IntoResponse,
-{
-    (
-        AppendHeaders([
-            (header::CONTENT_SECURITY_POLICY, csp),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-            (header::REFERRER_POLICY, "strict-origin-when-cross-origin"),
-            (header::CACHE_CONTROL, PROTECTED_CACHE_CONTROL),
-            (header::PRAGMA, "no-cache"),
-        ]),
-        Html(body),
-    )
-        .into_response()
+    web_assets::verify_2fa_page()
 }

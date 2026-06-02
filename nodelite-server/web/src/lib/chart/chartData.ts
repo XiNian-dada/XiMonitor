@@ -1,6 +1,6 @@
 /**
  * Pure chart data layer, ported from assets/node.html:2035-2147.
- * Buckets/averages history, computes display bounds (with p98 spike
+ * Buckets/averages history, computes display bounds (with high-percentile spike
  * clipping), and projects per-metric point series. No DOM.
  */
 
@@ -28,7 +28,10 @@ export interface DisplayBoundsOptions {
 export function quantile(values: number[], ratio: number): number | null {
   if (!Array.isArray(values) || values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
-  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1));
+  const idx = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.floor((sorted.length - 1) * ratio)),
+  );
   return sorted[idx] ?? null;
 }
 
@@ -38,13 +41,39 @@ export function chartBounds(values: number[], clipSpikes = false): ChartBounds {
   let displayMax = actualMax;
   let clipped = false;
   if (clipSpikes && values.length >= 12) {
-    const clippedMax = quantile(values, 0.98);
+    const clippedMax = spikeClipMax(values);
     if (clippedMax != null && clippedMax > actualMin && clippedMax < actualMax) {
       displayMax = clippedMax;
       clipped = true;
     }
   }
   return { actualMin, actualMax, displayMin: actualMin, displayMax, clipped };
+}
+
+function spikeClipRatio(sampleCount: number): number {
+  return sampleCount < 100 ? 0.95 : 0.98;
+}
+
+function robustSpikeClipRatio(sampleCount: number): number {
+  return sampleCount < 100 ? 0.9 : 0.95;
+}
+
+function spikeClipMax(values: number[]): number | null {
+  const primaryMax = quantile(values, spikeClipRatio(values.length));
+  const robustMax = quantile(values, robustSpikeClipRatio(values.length));
+  if (primaryMax == null || robustMax == null) return primaryMax;
+  if (robustMax > 0 && primaryMax > robustMax * 8) {
+    return robustMax;
+  }
+  return primaryMax;
+}
+
+function niceCeil(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return value;
+  const exponent = 10 ** Math.floor(Math.log10(value));
+  const normalized = value / exponent;
+  const step = [1, 1.25, 2, 2.5, 4, 5, 8, 10].find((candidate) => normalized <= candidate) ?? 10;
+  return step * exponent;
 }
 
 export function chartDisplayBounds(
@@ -60,6 +89,9 @@ export function chartDisplayBounds(
   }
   if (bounds.displayMax <= bounds.displayMin) {
     bounds.displayMax = bounds.displayMin + 1;
+  }
+  if (bounds.displayMin <= 0 && bounds.displayMax > 0) {
+    bounds.displayMax = niceCeil(bounds.displayMax);
   }
   return bounds;
 }

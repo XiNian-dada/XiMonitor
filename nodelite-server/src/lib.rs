@@ -36,7 +36,7 @@ mod startup;
 mod state;
 #[cfg(test)]
 mod test_support;
-mod ui;
+mod web_assets;
 mod ws;
 
 #[cfg(test)]

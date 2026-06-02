@@ -33,6 +33,10 @@ describe('quantile', () => {
     const vals = Array.from({ length: 100 }, (_, i) => i + 1); // 1..100
     expect(quantile(vals, 0.98)).toBe(98);
   });
+  it('does not pick a single max spike in short history windows', () => {
+    const vals = [...Array.from({ length: 39 }, (_, i) => i + 1), 1000];
+    expect(quantile(vals, 0.98)).toBeLessThan(1000);
+  });
 });
 
 describe('chartBounds', () => {
@@ -55,6 +59,14 @@ describe('chartBounds', () => {
   it('does not clip with fewer than 12 points', () => {
     expect(chartBounds([1, 2, 1000], true).clipped).toBe(false);
   });
+
+  it('uses a more robust bound when several adjacent samples are extreme', () => {
+    const steady = Array.from({ length: 42 }, (_, i) => 1_000_000 + i);
+    const spikes = [800_000_000, 820_000_000, 850_000_000];
+    const b = chartBounds([...steady, ...spikes], true);
+    expect(b.clipped).toBe(true);
+    expect(b.displayMax).toBeLessThan(2_000_000);
+  });
 });
 
 describe('chartDisplayBounds', () => {
@@ -66,6 +78,15 @@ describe('chartDisplayBounds', () => {
   it('forces a 1-unit span when flat', () => {
     const b = chartDisplayBounds([5, 5]);
     expect(b.displayMax).toBe(b.displayMin + 1);
+  });
+  it('rounds positive zero-based ranges to a readable ceiling', () => {
+    const b = chartDisplayBounds([0, 75], { minValue: 0 });
+    expect(b.displayMax).toBe(80);
+  });
+  it('can pin capacity charts to a 100 percent range', () => {
+    const b = chartDisplayBounds([74, 76], { minValue: 0, maxValue: 100 });
+    expect(b.displayMin).toBe(0);
+    expect(b.displayMax).toBe(100);
   });
 });
 

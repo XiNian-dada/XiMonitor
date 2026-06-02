@@ -70,19 +70,21 @@ async function save(): Promise<void> {
             v-model:code="reauth.code"
             variant="both"
           />
-          <button
-            type="button"
-            class="btn btn--primary"
-            :disabled="store.saving"
-            data-test="alerts-save"
-            @click="save"
-          >
-            {{ t('alerts.save') }}
-          </button>
-          <SettingsMessage :state="message.state" :text="message.text" />
+          <div class="save-bar__actions">
+            <button
+              type="button"
+              class="btn btn--primary"
+              :disabled="store.saving"
+              data-test="alerts-save"
+              @click="save"
+            >
+              {{ t('alerts.save') }}
+            </button>
+            <SettingsMessage :state="message.state" :text="message.text" />
+          </div>
         </article>
 
-        <div class="alerts__grid">
+        <div class="alerts__grid" :class="{ 'alerts__grid--disabled': !draft.enabled }">
           <SmtpChannelCard v-model="draft.smtp" />
           <WebhookChannelCard v-model="draft.webhook" />
           <InspectionCard v-model="draft.inspection" />
@@ -113,9 +115,12 @@ async function save(): Promise<void> {
 }
 .alerts__grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
   gap: 16px;
   align-items: start;
+}
+.alerts__grid--disabled {
+  opacity: 0.82;
 }
 .panel {
   background: var(--bg-card);
@@ -124,9 +129,21 @@ async function save(): Promise<void> {
   padding: 18px 20px;
 }
 .save-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: end;
+}
+.save-bar :deep(.reauth-fields) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.save-bar__actions {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  align-items: flex-start;
+  gap: 10px;
 }
 .btn {
   align-self: flex-start;
@@ -160,5 +177,13 @@ async function save(): Promise<void> {
 .placeholder {
   color: var(--text-muted);
   font-size: 13px;
+}
+@media (max-width: 760px) {
+  .save-bar {
+    grid-template-columns: 1fr;
+  }
+  .save-bar :deep(.reauth-fields) {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

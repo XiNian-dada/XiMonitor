@@ -34,19 +34,17 @@ use crate::background::{
 };
 use crate::fs_security::log_if_directory_is_not_private;
 use crate::handlers::{
-    alert_settings, audit_log, bootstrap, brand_logo_dark_asset, brand_logo_light_asset,
-    change_readonly_password, disable_two_factor, enable_two_factor, healthz, index,
-    index_alert_settings_js_asset, index_settings_js_asset, install_agent_script,
-    install_bootstrap, logout_and_reauth, metrics, node_detail, node_history, node_logs,
-    node_status, nodes, overview, readyz, refresh_node_token, require_readonly_auth,
-    server_update_log, settings, start_server_update, start_two_factor_setup, ui_i18n_asset,
-    update_alert_settings, verify_2fa_api, verify_2fa_page,
+    alert_settings, audit_log, bootstrap, change_readonly_password, disable_two_factor,
+    enable_two_factor, healthz, index, install_agent_script, install_bootstrap, logout_and_reauth,
+    metrics, node_detail, node_history, node_logs, node_status, nodes, overview, readyz,
+    refresh_node_token, require_readonly_auth, server_update_log, settings, start_server_update,
+    start_two_factor_setup, static_asset, update_alert_settings, verify_2fa_api, verify_2fa_page,
 };
 use crate::history::HistoryStore;
 use crate::registry::NodeRegistry;
 use crate::snapshot::{load_snapshot, persist_snapshot, spawn_snapshot_persistor};
 use crate::state::SharedState;
-use crate::ws::ws_handler;
+use crate::ws::{ws_browser_handler, ws_handler};
 
 pub(crate) const PROTECTED_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; img-src 'self' data:; \
      connect-src 'self' https://raw.githubusercontent.com https://api.github.com; font-src 'self'; \
@@ -161,6 +159,7 @@ async fn initialize_server_runtime(
         registry,
         shared,
         ws_admission: WsAdmissionController::new(&config.ws),
+        browser_ws_admission: WsAdmissionController::new(&config.ws),
         readonly_auth: Arc::new(RwLock::new(readonly_route_auth)),
         alerting: Arc::new(RwLock::new(config.alerting.clone())),
         two_factor_sessions: TwoFactorSessions::new(),
@@ -303,14 +302,13 @@ pub(crate) fn build_router(state: AppState) -> Router {
     let protected_routes = Router::new()
         .route("/", get(index))
         .route("/nodes/{node_id}", get(node_detail))
-        .route("/assets/brand-logo-dark.webp", get(brand_logo_dark_asset))
-        .route("/assets/brand-logo-light.webp", get(brand_logo_light_asset))
-        .route(
-            "/assets/index-alert-settings.js",
-            get(index_alert_settings_js_asset),
-        )
-        .route("/assets/index-settings.js", get(index_settings_js_asset))
-        .route("/assets/ui-i18n.json", get(ui_i18n_asset))
+        // SPA history-mode routes: every top-level Vue route must return the SPA
+        // shell so deep links / refresh boot the app instead of hitting a 404.
+        // Keep in sync with web/src/router/index.ts.
+        .route("/settings", get(index))
+        .route("/account", get(index))
+        .route("/alerts", get(index))
+        .route("/assets/{*path}", get(static_asset))
         .route("/api/bootstrap", get(bootstrap))
         .route("/api/overview", get(overview))
         .route("/metrics", get(metrics))
@@ -319,6 +317,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/nodes/{node_id}/history", get(node_history))
         .route("/api/nodes/{node_id}/logs", get(node_logs))
         .route("/api/audit-log", get(audit_log))
+        .route("/ws/browser", get(ws_browser_handler))
         .route("/api/settings", get(settings))
         .route("/api/settings/alerts", get(alert_settings))
         .route("/api/settings/update/server/log", get(server_update_log))

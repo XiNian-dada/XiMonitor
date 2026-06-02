@@ -60,6 +60,9 @@ importers:
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.19)(jsdom@25.0.1)
+      vitest-websocket-mock:
+        specifier: 0.4.0
+        version: 0.4.0(vitest@2.1.9(@types/node@22.19.19)(jsdom@25.0.1))
       vue-tsc:
         specifier: ^2.1.10
         version: 2.2.12(typescript@5.6.3)
@@ -1261,6 +1264,10 @@ packages:
     resolution: {integrity: sha512-tEBHqDnIoM/1rXME1zgka9g6Q2lcoCkxHLuc7ODJ5BxbP5d4c2Z5cGgtXAku59200Cx7diuHTOYfSBD8n6mm8A==}
     engines: {node: '>=16 || 14 >=14.17'}
 
+  mock-socket@9.3.1:
+    resolution: {integrity: sha512-qxBgB7Qa2sEQgHFjj0dSigq7fX4k6Saisd5Nelwp2q8mlbAFh5dHV9JTTlF8viYJLSSWgMCZFUom8PJcMNBoJw==}
+    engines: {node: '>= 8'}
+
   ms@2.1.3:
     resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
 
@@ -1592,6 +1599,11 @@ packages:
         optional: true
       terser:
         optional: true
+
+  vitest-websocket-mock@0.4.0:
+    resolution: {integrity: sha512-tGnOwE2nC8jfioQXDrX+lZ8EVrF+IO2NVqe1vV9h945W/hlR0S6ZYbMqCJGG3Nyd//c5XSe1IGLD2ZgE2D1I7Q==}
+    peerDependencies:
+      vitest: '>=2'
 
   vitest@2.1.9:
     resolution: {integrity: sha512-MSmPM9REYqDGBI8439mA4mWhV5sKmDlBKWIYbA3lRb2PTHACE0mgKwA8yQ2xq9vxDTuk4iPrECBAEW2aoFXY0Q==}
@@ -2912,6 +2924,8 @@ snapshots:
 
   minipass@7.1.3: {}
 
+  mock-socket@9.3.1: {}
+
   ms@2.1.3: {}
 
   muggle-string@0.4.1: {}
@@ -3210,6 +3224,12 @@ snapshots:
     optionalDependencies:
       '@types/node': 22.19.19
       fsevents: 2.3.3
+
+  vitest-websocket-mock@0.4.0(vitest@2.1.9(@types/node@22.19.19)(jsdom@25.0.1)):
+    dependencies:
+      '@vitest/utils': 2.1.9
+      mock-socket: 9.3.1
+      vitest: 2.1.9(@types/node@22.19.19)(jsdom@25.0.1)
 
   vitest@2.1.9(@types/node@22.19.19)(jsdom@25.0.1):
     dependencies:

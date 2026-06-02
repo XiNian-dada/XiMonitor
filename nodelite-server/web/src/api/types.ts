@@ -412,3 +412,31 @@ export interface RefreshNodeTokenRequest {
   current_password?: string;
   code?: string;
 }
+
+// --- WebSocket Browser Messages (nodelite-proto/src/message.rs BrowserMessage) ---
+// TODO(Stage 6.2): Auto-generate from proto crate instead of hand-writing.
+
+export type BrowserMessage =
+  | {
+      type: 'initial_state';
+      generated_at: string;
+      overview: OverviewData;
+      nodes: NodeListItem[];
+    }
+  | {
+      type: 'overview_update';
+      generated_at: string;
+      overview: OverviewData;
+    }
+  | {
+      type: 'node_upsert';
+      generated_at: string;
+      node: NodeListItem;
+    }
+  | {
+      type: 'node_removed';
+      generated_at: string;
+      node_id: string;
+    }
+  | { type: 'ping' }
+  | { type: 'pong' };

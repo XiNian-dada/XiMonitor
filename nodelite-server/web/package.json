@@ -35,6 +35,7 @@
     "typescript": "~5.6.3",
     "vite": "^5.4.11",
     "vitest": "^2.1.8",
+    "vitest-websocket-mock": "0.4.0",
     "vue-tsc": "^2.1.10"
   },
   "engines": {

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import type { AlertSmtpTransport } from '@/api';
 import type { SmtpDraft } from '@/lib/alertsDraft';
@@ -15,6 +16,13 @@ const smtp = defineModel<SmtpDraft>({ required: true });
 const { t } = useI18n();
 
 const transports: AlertSmtpTransport[] = ['start_tls', 'tls', 'plain'];
+const summary = computed(() => {
+  const parts = [
+    smtp.value.host || t('settings.disabled'),
+    smtp.value.recipients.length ? smtp.value.recipients.join(', ') : '',
+  ].filter(Boolean);
+  return parts.join(' · ');
+});
 </script>
 
 <template>
@@ -27,7 +35,11 @@ const transports: AlertSmtpTransport[] = ['start_tls', 'tls', 'plain'];
       </label>
     </header>
 
-    <div class="form">
+    <p v-if="!smtp.enabled" class="collapsed-note" data-test="smtp-collapsed">
+      {{ summary }}
+    </p>
+
+    <div v-else class="form" data-test="smtp-form">
       <div class="split">
         <label class="field">
           <span>{{ t('alerts.smtp.host') }}</span>
@@ -102,6 +114,15 @@ const transports: AlertSmtpTransport[] = ['start_tls', 'tls', 'plain'];
   font-size: 14px;
   font-weight: 600;
 }
+.collapsed-note {
+  margin: 0;
+  background: var(--bg-card-soft);
+  border: 1px dashed var(--border-soft);
+  border-radius: 10px;
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 12px;
+}
 .form {
   display: flex;
   flex-direction: column;
@@ -138,5 +159,15 @@ const transports: AlertSmtpTransport[] = ['start_tls', 'tls', 'plain'];
   gap: 6px;
   font-size: 13px;
   color: var(--text-secondary);
+}
+@media (max-width: 560px) {
+  .card-head,
+  .split {
+    grid-template-columns: 1fr;
+  }
+  .card-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 </style>

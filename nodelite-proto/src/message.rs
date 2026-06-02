@@ -1,9 +1,10 @@
 //! Agent 与 Server 之间通过 WebSocket 交换的消息定义。
 //! 所有消息均为 JSON 文本帧,顶层使用 `type` 字段进行内部标记式枚举区分。
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::model::{NodeIdentity, NodeSnapshot};
+use crate::model::{NodeIdentity, NodeListItem, NodeSnapshot, OverviewData};
 
 /// 当前 WebSocket 线协议版本。
 ///
@@ -119,6 +120,43 @@ pub enum NoticeLevel {
     Info,
     Warn,
     Error,
+}
+
+/// Server → 浏览器 WebSocket(`/ws/browser`)通道上的消息。
+///
+/// 与 Agent 通道的 [`WireMessage`] 区分:浏览器通道是只读监控推送,客户端只发送
+/// 应用层 [`BrowserMessage::Ping`](浏览器 `WebSocket` API 无法发送协议级 ping 帧)。
+///
+/// 除全量 `InitialState` 外都是**增量**:单节点变化只发该节点一行,而非整张列表。
+/// 每条消息携带 `generated_at`,客户端据此做单调时间戳守卫,丢弃乱序/过期消息。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BrowserMessage {
+    /// 连接建立(以及重连 / 服务端 lag 恢复)时下发的全量快照,客户端整体替换本地状态。
+    InitialState {
+        generated_at: DateTime<Utc>,
+        overview: OverviewData,
+        nodes: Vec<NodeListItem>,
+    },
+    /// 概览聚合数字更新(整体替换,体积很小)。
+    OverviewUpdate {
+        generated_at: DateTime<Utc>,
+        overview: OverviewData,
+    },
+    /// 单节点增量:新增或更新一行,客户端按 `node_id` 合并进本地 Map。
+    NodeUpsert {
+        generated_at: DateTime<Utc>,
+        node: NodeListItem,
+    },
+    /// 单节点移除(注销),客户端按 `node_id` 删除。
+    NodeRemoved {
+        generated_at: DateTime<Utc>,
+        node_id: String,
+    },
+    /// 应用层心跳:客户端发送 `Ping`,服务端回 `Pong`。
+    Ping,
+    /// 服务端对客户端 `Ping` 的应答。
+    Pong,
 }
 
 #[cfg(test)]
@@ -261,5 +299,84 @@ mod tests {
             let decoded: WireMessage = serde_json::from_str(&encoded).expect("decode");
             assert_eq!(message, decoded);
         }
+    }
+
+    /// 验证所有 BrowserMessage 子类型(含增量与心跳)都能完整序列化和反序列化。
+    #[test]
+    fn round_trips_browser_messages() {
+        use super::BrowserMessage;
+        use crate::model::{
+            NodeListIdentity, NodeListItem, NodeListLoadAverage, NodeListMemoryUsage,
+            NodeListSnapshot, OverviewData,
+        };
+
+        let generated_at = Utc.with_ymd_and_hms(2026, 5, 31, 12, 0, 0).unwrap();
+        let overview = OverviewData {
+            generated_at,
+            total_nodes: 3,
+            online_nodes: 2,
+            offline_nodes: 1,
+            total_rx_bytes: 1000,
+            total_tx_bytes: 2000,
+            current_rx_bytes_per_sec: 12.5,
+            current_tx_bytes_per_sec: 24.0,
+            average_latency_ms: Some(7.5),
+        };
+        let node = NodeListItem {
+            identity: NodeListIdentity {
+                node_id: "hk-01".to_string(),
+                node_label: "Hong Kong 01".to_string(),
+                hostname: "hk-01".to_string(),
+                tags: vec!["apac".to_string()],
+            },
+            snapshot: Some(NodeListSnapshot {
+                cpu_usage_percent: Some(33.0),
+                load: NodeListLoadAverage { one: 0.5 },
+                memory: NodeListMemoryUsage {
+                    total_bytes: 2048,
+                    used_bytes: 1024,
+                },
+            }),
+            latency_ms: Some(9),
+            online: true,
+        };
+
+        let initial = BrowserMessage::InitialState {
+            generated_at,
+            overview: overview.clone(),
+            nodes: vec![node.clone()],
+        };
+        let overview_update = BrowserMessage::OverviewUpdate {
+            generated_at,
+            overview,
+        };
+        let upsert = BrowserMessage::NodeUpsert { generated_at, node };
+        let removed = BrowserMessage::NodeRemoved {
+            generated_at,
+            node_id: "hk-01".to_string(),
+        };
+
+        for message in [
+            initial,
+            overview_update,
+            upsert,
+            removed,
+            BrowserMessage::Ping,
+            BrowserMessage::Pong,
+        ] {
+            let encoded = serde_json::to_string(&message).expect("encode");
+            let decoded: BrowserMessage = serde_json::from_str(&encoded).expect("decode");
+            assert_eq!(message, decoded);
+        }
+
+        // 标记式枚举的线格式:单元变体只剩一个 `type` 字段。
+        assert_eq!(
+            serde_json::to_string(&BrowserMessage::Ping).expect("encode"),
+            r#"{"type":"ping"}"#
+        );
+        // 客户端发来的 ping 文本帧必须能被服务端解析为 Ping。
+        let parsed: BrowserMessage =
+            serde_json::from_str(r#"{"type":"ping"}"#).expect("parse client ping");
+        assert_eq!(parsed, BrowserMessage::Ping);
     }
 }

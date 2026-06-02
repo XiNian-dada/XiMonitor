@@ -13,7 +13,15 @@ set -eu
 # 默认 umask:确保临时文件不会泄漏给同主机其它用户。
 umask 077
 
-BASE_URL="${NODELITE_SERVER_BASE_URL:-https://github.com/XiNian-dada/NodeLite/releases/latest/download}"
+# VERSION 环境变量:默认只安装正式版本。如需 alpha/beta/RC 等预发布版本,
+# 必须显式设置 VERSION=v2.3.0-alpha.1,否则安装脚本会拒绝。
+# 留空时自动使用 GitHub 最新正式版。
+VERSION="${NODELITE_SERVER_VERSION:-}"
+if [ -n "$VERSION" ]; then
+  BASE_URL="${NODELITE_SERVER_BASE_URL:-https://github.com/XiNian-dada/NodeLite/releases/download/${VERSION}}"
+else
+  BASE_URL="${NODELITE_SERVER_BASE_URL:-https://github.com/XiNian-dada/NodeLite/releases/latest/download}"
+fi
 INSTALL_ROOT_DEFAULT="/opt/nodelite"
 LISTEN_HOST_DEFAULT="127.0.0.1"
 SERVICE_NAME="nodelite-server"
@@ -234,8 +242,26 @@ fetch_expected_sha256() {
   printf '%s' "$expected_sha256"
 }
 
+# 检查版本号是否是正式版（不含 alpha/beta/RC 标记）。
+is_stable_version() {
+  case "$1" in
+    *-alpha*|*-beta*|*-rc*|*-pre*|*-test*)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 # 把 `releases/latest/download` 解析为具体 tag,固化本次安装版本。
+# 如果用户通过 VERSION 环境变量指定了版本,则跳过解析直接使用。
 resolve_release_base_url() {
+  if [ -n "$VERSION" ]; then
+    printf '%s\n' "Installing specified version: $VERSION"
+    if ! is_stable_version "$VERSION"; then
+      printf '%s\n' "Warning: $VERSION is a pre-release. Use at your own risk." >&2
+    fi
+    return 0
+  fi
   case "$BASE_URL" in
     https://github.com/*/releases/latest/download)
       releases_root="${BASE_URL%/latest/download}"
@@ -254,6 +280,9 @@ resolve_release_base_url() {
         || fail "failed to resolve latest GitHub release"
       [ -n "$redirect_location" ] || fail "GitHub latest release redirect did not include a location"
       resolved_tag="${redirect_location##*/}"
+      if ! is_stable_version "$resolved_tag"; then
+        fail "resolved latest release '${resolved_tag}' is a pre-release. Set NODELITE_SERVER_VERSION=${resolved_tag} to install it explicitly."
+      fi
       BASE_URL="${releases_root}/download/${resolved_tag}"
       printf '%s\n' "Resolved GitHub latest release tag: $resolved_tag"
       ;;

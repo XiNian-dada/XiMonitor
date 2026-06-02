@@ -6,7 +6,13 @@ import { viewToDraft, type SmtpDraft } from '@/lib/alertsDraft';
 import { makeAlertSettingsView } from '@/api/__fixtures__/nodes';
 import SmtpChannelCard from './SmtpChannelCard.vue';
 
-const FAKE_DICT = { en: { 'alerts.secret.keep': 'leave blank to keep' }, 'zh-CN': {} };
+const FAKE_DICT = {
+  en: {
+    'alerts.secret.keep': 'leave blank to keep',
+    'settings.disabled': 'Disabled',
+  },
+  'zh-CN': {},
+};
 const Stub = defineComponent({ render: () => h('div') });
 
 function mountCard(smtp: SmtpDraft) {
@@ -41,8 +47,12 @@ describe('SmtpChannelCard', () => {
   it('binds enabled + password edits back into the draft slice', async () => {
     const smtp = reactive(viewToDraft(makeAlertSettingsView({ smtp: { enabled: false } })).smtp);
     const wrapper = mountCard(smtp);
+    expect(wrapper.find('[data-test="smtp-collapsed"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="smtp-form"]').exists()).toBe(false);
+
     await wrapper.find('[data-test="smtp-enabled"]').setValue(true);
     expect(smtp.enabled).toBe(true);
+    expect(wrapper.find('[data-test="smtp-form"]').exists()).toBe(true);
     await wrapper.find('[data-test="smtp-password"]').setValue('new-secret');
     expect(smtp.password).toBe('new-secret');
   });

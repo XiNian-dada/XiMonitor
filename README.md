@@ -27,6 +27,8 @@ NodeLite 是一个用 Rust 编写的轻量级服务器监控面板，包含：
 完整的公开部署文档可直接查看 GitHub Pages：
 [https://xinian-dada.github.io/NodeLite/](https://xinian-dada.github.io/NodeLite/)
 
+> **版本建议**：请始终使用 [GitHub Releases](https://github.com/XiNian-dada/NodeLite/releases) 中的**最新正式版本**（不含 `-alpha`、`-beta`、`-rc` 标记）。`latest` 指向的即是最新正式版，pre-release 不会被自动选中。不要在正式环境中使用测试版本。
+
 推荐按下面 3 步体验完整流程：
 
 1. 安装服务端

@@ -28,6 +28,10 @@ const FAKE_DICT = {
     'alerts.saved': 'Saved',
     'alerts.save_failed': 'Save failed: {error}',
     'alerts.secret.keep': 'leave blank to keep',
+    'settings.disabled': 'Disabled',
+    'common.not_available': 'n/a',
+    'alerts.channel.smtp': 'SMTP',
+    'alerts.channel.webhook': 'Webhook',
     'alerts.rules.title': 'Alert Rules',
     'alerts.rules.add': 'Add rule',
     'alerts.preview.title': 'Preview',
@@ -97,7 +101,8 @@ describe('AlertsView', () => {
     expect(wrapper.find('[data-test="alert-overview-card"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="alerts-save-bar"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="smtp-host"]').exists()).toBe(true);
-    expect(wrapper.find('[data-test="webhook-url"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="webhook-collapsed"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="webhook-url"]').exists()).toBe(false);
     expect(wrapper.find('[data-test="inspection-lookback"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="rule-list"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="rule-card"]').exists()).toBe(true);

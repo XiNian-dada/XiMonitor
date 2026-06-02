@@ -59,6 +59,27 @@ describe('MetricChart', () => {
     expect(wrapper.findAll('text').length).toBeGreaterThan(0);
   });
 
+  it('renders x-axis time ticks from point timestamps', () => {
+    const wrapper = mountChart({
+      points: pts([10, 50, 90]),
+      valueKind: 'percent',
+      color: 'var(--chart-cpu)',
+      label: 'CPU',
+    });
+    expect(wrapper.findAll('[data-test="metric-chart-x-tick"]').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('clips spikes by default to match the legacy chart state', () => {
+    const wrapper = mountChart({
+      points: pts([...Array.from({ length: 50 }, (_, i) => i + 1), 1000]),
+      valueKind: 'percent',
+      color: 'var(--chart-cpu)',
+      label: 'CPU',
+    });
+    const labels = wrapper.findAll('.metric-chart__grid text').map((text) => text.text());
+    expect(labels.at(-1)).not.toBe('1000%');
+  });
+
   it('renders a multi-series chart with a line per series and no area', () => {
     const wrapper = mountChart({
       series: [

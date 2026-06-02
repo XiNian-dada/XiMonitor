@@ -34,6 +34,24 @@ jobs:
           fetch-depth: 0
           ref: refs/tags/${{ env.RELEASE_TAG }}
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: nodelite-server/web/pnpm-lock.yaml
+
+      - name: Build web assets
+        working-directory: nodelite-server/web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
       - name: Set up Rust
         # 发布前和 CI 一样要求 rustfmt / clippy 都通过。
         run: |
@@ -63,9 +81,13 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run clippy
+        env:
+          NODELITE_SKIP_WEB_BUILD: 1
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Run tests
+        env:
+          NODELITE_SKIP_WEB_BUILD: 1
         run: cargo test --workspace --locked
 
       - name: Shellcheck installers
@@ -96,6 +118,24 @@ jobs:
         with:
           fetch-depth: 0
           ref: refs/tags/${{ env.RELEASE_TAG }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: nodelite-server/web/pnpm-lock.yaml
+
+      - name: Build web assets
+        working-directory: nodelite-server/web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
 
       - name: Set up Rust
         run: |
@@ -137,8 +177,10 @@ jobs:
 
       - name: Build release binaries
         # 通过 NODELITE_BUILD_VERSION 把 tag 注入二进制,便于运行时打印版本号。
+        # NODELITE_SKIP_WEB_BUILD=1 因为前端资源已在前面步骤构建完成。
         run: |
           NODELITE_BUILD_VERSION="${RELEASE_TAG#v}" \
+          NODELITE_SKIP_WEB_BUILD=1 \
           cross build --locked --release --target "${{ matrix.target }}" \
             -p nodelite-server \
             -p nodelite-agent
@@ -253,11 +295,21 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ env.RELEASE_TAG }}
         run: |
+          release_flags=()
+          if [[ "$TAG_NAME" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
+
           if ! gh release view "$TAG_NAME" --repo "$GH_REPO" >/dev/null 2>&1; then
             gh release create "$TAG_NAME" \
               --repo "$GH_REPO" \
               --title "NodeLite $TAG_NAME" \
-              --generate-notes
+              --generate-notes \
+              "${release_flags[@]}"
+          elif [[ "$TAG_NAME" == *-* ]]; then
+            gh release edit "$TAG_NAME" \
+              --repo "$GH_REPO" \
+              --prerelease
           fi
 
           gh release upload "$TAG_NAME" \

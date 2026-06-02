@@ -47,7 +47,15 @@ INSTALL_TOKEN_FILE="${NODELITE_AGENT_INSTALL_TOKEN_FILE:-}"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/nodelite"
 MODE="${NODELITE_AGENT_MODE:-auto}"
-BASE_URL="${NODELITE_AGENT_BASE_URL:-https://github.com/XiNian-dada/NodeLite/releases/latest/download}"
+# VERSION 环境变量:默认只安装正式版本。如需 alpha/beta/RC 等预发布版本,
+# 必须显式设置 VERSION=v2.3.0-alpha.1,否则安装脚本会拒绝。
+# 留空时自动使用 GitHub 最新正式版。
+VERSION="${NODELITE_AGENT_VERSION:-}"
+if [ -n "$VERSION" ]; then
+  BASE_URL="${NODELITE_AGENT_BASE_URL:-https://github.com/XiNian-dada/NodeLite/releases/download/${VERSION}}"
+else
+  BASE_URL="${NODELITE_AGENT_BASE_URL:-https://github.com/XiNian-dada/NodeLite/releases/latest/download}"
+fi
 CHECKSUMS_URL="${NODELITE_AGENT_CHECKSUMS_URL:-}"
 BINARY_URL="${NODELITE_AGENT_BINARY_URL:-}"
 SHA256_X86_64="${NODELITE_AGENT_SHA256_X86_64:-}"
@@ -223,8 +231,25 @@ fetch_expected_sha256() {
   [ -n "$EXPECTED_SHA256" ] || fail "missing checksum entry for $artifact_name"
 }
 
+# 检查版本号是否是正式版（不含 alpha/beta/RC 标记）。
+is_stable_version() {
+  case "$1" in
+    *-alpha*|*-beta*|*-rc*|*-pre*|*-test*)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 # 把 `releases/latest/download` 形式的下载源解析成具体 tag,避免每次升级又跳到最新版。
 resolve_release_base_url() {
+  if [ -n "$VERSION" ]; then
+    printf '%s\n' "Installing specified version: $VERSION"
+    if ! is_stable_version "$VERSION"; then
+      printf '%s\n' "Warning: $VERSION is a pre-release. Use at your own risk." >&2
+    fi
+    return 0
+  fi
   case "$BASE_URL" in
     https://github.com/*/releases/latest/download)
       releases_root="${BASE_URL%/latest/download}"
@@ -243,6 +268,9 @@ resolve_release_base_url() {
         || fail "failed to resolve latest GitHub release"
       [ -n "$redirect_location" ] || fail "GitHub latest release redirect did not include a location"
       resolved_tag="${redirect_location##*/}"
+      if ! is_stable_version "$resolved_tag"; then
+        fail "resolved latest release '${resolved_tag}' is a pre-release. Set NODELITE_AGENT_VERSION=${resolved_tag} to install it explicitly."
+      fi
       BASE_URL="${releases_root}/download/${resolved_tag}"
       printf '%s\n' "Resolved GitHub latest release tag: $resolved_tag"
       ;;

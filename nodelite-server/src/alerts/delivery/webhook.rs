@@ -79,20 +79,33 @@ struct InspectionHighlightNotification<'a> {
     reasons: &'a [String],
 }
 
+#[derive(Debug, Serialize)]
+struct WeComTextNotification<'a> {
+    msgtype: &'static str,
+    text: WeComTextContent<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct WeComTextContent<'a> {
+    content: &'a str,
+}
+
 pub(crate) async fn send_alert_event(
     config: &AlertWebhookConfig,
     event: &AlertEvent,
 ) -> Result<(), AlertDeliveryError> {
-    let notification = notification_from_event(event);
-    send_notification(config, &notification).await
+    let url = Url::parse(&config.url)?;
+    let payload = alert_payload(&url, event)?;
+    send_payload(config, url, &payload).await
 }
 
 pub(crate) async fn send_inspection_summary(
     config: &AlertWebhookConfig,
     summary: &InspectionSummary<'_>,
 ) -> Result<(), AlertDeliveryError> {
-    let notification = inspection_notification(summary);
-    send_notification(config, &notification).await
+    let url = Url::parse(&config.url)?;
+    let payload = inspection_payload(&url, summary)?;
+    send_payload(config, url, &payload).await
 }
 
 pub(crate) fn endpoint_label(url: &str) -> String {
@@ -103,15 +116,14 @@ pub(crate) fn endpoint_label(url: &str) -> String {
     format!("{}://{}{}", parsed.scheme(), host, parsed.path())
 }
 
-async fn send_notification<T: Serialize>(
+async fn send_payload(
     config: &AlertWebhookConfig,
-    notification: &T,
+    url: Url,
+    payload: &[u8],
 ) -> Result<(), AlertDeliveryError> {
-    let url = Url::parse(&config.url)?;
-    let payload = serde_json::to_vec(notification)?;
     timeout(
         WEBHOOK_TIMEOUT,
-        send_http_post(url, &payload, config.secret.as_deref()),
+        send_http_post(url, payload, config.secret.as_deref()),
     )
     .await
     .map_err(|_| AlertDeliveryError::Timeout)?
@@ -141,6 +153,33 @@ fn notification_from_event(event: &AlertEvent) -> AlertNotification<'_> {
                 threshold: reading.threshold,
             }),
     }
+}
+
+fn alert_payload(url: &Url, event: &AlertEvent) -> Result<Vec<u8>, AlertDeliveryError> {
+    if is_wecom_robot_webhook(url) {
+        let content = wecom_alert_text(event);
+        let notification = WeComTextNotification {
+            msgtype: "text",
+            text: WeComTextContent { content: &content },
+        };
+        return serde_json::to_vec(&notification).map_err(AlertDeliveryError::from);
+    }
+    serde_json::to_vec(&notification_from_event(event)).map_err(AlertDeliveryError::from)
+}
+
+fn inspection_payload(
+    url: &Url,
+    summary: &InspectionSummary<'_>,
+) -> Result<Vec<u8>, AlertDeliveryError> {
+    if is_wecom_robot_webhook(url) {
+        let content = wecom_inspection_text(summary);
+        let notification = WeComTextNotification {
+            msgtype: "text",
+            text: WeComTextContent { content: &content },
+        };
+        return serde_json::to_vec(&notification).map_err(AlertDeliveryError::from);
+    }
+    serde_json::to_vec(&inspection_notification(summary)).map_err(AlertDeliveryError::from)
 }
 
 fn inspection_notification<'a>(
@@ -173,6 +212,64 @@ fn inspection_notification<'a>(
             })
             .collect(),
     }
+}
+
+fn is_wecom_robot_webhook(url: &Url) -> bool {
+    url.host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case("qyapi.weixin.qq.com"))
+        && url.path() == "/cgi-bin/webhook/send"
+}
+
+fn wecom_alert_text(event: &AlertEvent) -> String {
+    let mut text = format!(
+        "NodeLite alert {}\nRule: {} ({})\nSeverity: {:?}\nNode: {} ({})\nTime: {}",
+        event.kind.as_str(),
+        event.rule.name,
+        event.rule.id,
+        event.rule.severity,
+        event.node_label,
+        event.node_id,
+        event.occurred_at.to_rfc3339(),
+    );
+    if let Some(reading) = event.reading.as_ref() {
+        text.push_str(&format!(
+            "\nMetric: {:?}\nValue: {}\nThreshold: {}",
+            reading.metric, reading.value, reading.threshold
+        ));
+    }
+    text
+}
+
+fn wecom_inspection_text(summary: &InspectionSummary<'_>) -> String {
+    let report = summary.report;
+    let mut text = format!(
+        "NodeLite daily inspection {}\nLookback: {}h\nTotal nodes: {}\nOffline: {}\nHigh latency: {}\nCPU hot: {}\nMemory hot: {}",
+        summary.local_date,
+        summary.lookback_hours,
+        report.total_nodes,
+        report.offline_nodes,
+        report.latency_nodes,
+        report.cpu_hot_nodes,
+        report.memory_hot_nodes,
+    );
+    if !report.highlights.is_empty() {
+        text.push_str("\nHighlights:");
+        for highlight in report.highlights.iter().take(10) {
+            text.push_str(&format!(
+                "\n- {} ({}): {}",
+                highlight.node_label,
+                highlight.node_id,
+                highlight.reasons.join(", ")
+            ));
+        }
+        if report.highlights.len() > 10 {
+            text.push_str(&format!(
+                "\n- ... {} more nodes",
+                report.highlights.len() - 10
+            ));
+        }
+    }
+    text
 }
 
 async fn send_http_post(
@@ -323,4 +420,87 @@ fn parse_status(response_headers: &str) -> Result<u16, AlertDeliveryError> {
         .parse::<u16>()
         .map_err(|_| AlertDeliveryError::InvalidResponse)?;
     Ok(status)
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use nodelite_proto::{
+        AlertChannel, AlertComparator, AlertMetric, AlertRuleConfig, AlertScopeMode, AlertSeverity,
+    };
+    use serde_json::Value;
+    use url::Url;
+
+    use super::{alert_payload, is_wecom_robot_webhook};
+    use crate::alerts::{AlertEvent, AlertEventKind, AlertMetricReading};
+
+    #[test]
+    fn detects_wecom_robot_webhook_urls() {
+        let wecom = Url::parse("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc").unwrap();
+        let normal = Url::parse("https://hooks.example.com/cgi-bin/webhook/send?key=abc").unwrap();
+
+        assert!(is_wecom_robot_webhook(&wecom));
+        assert!(!is_wecom_robot_webhook(&normal));
+    }
+
+    #[test]
+    fn wecom_alert_payload_uses_text_message_shape() {
+        let url = Url::parse("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc").unwrap();
+        let payload = alert_payload(&url, &sample_event()).expect("payload should serialize");
+        let json: Value = serde_json::from_slice(&payload).expect("payload should be json");
+
+        assert_eq!(json["msgtype"], "text");
+        assert!(
+            json["text"]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("NodeLite alert triggered"))
+        );
+        assert!(
+            json["text"]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("CPU hot"))
+        );
+        assert!(json.get("event").is_none());
+    }
+
+    #[test]
+    fn normal_alert_payload_keeps_nodelite_event_shape() {
+        let url = Url::parse("https://hooks.example.com/alerts").unwrap();
+        let payload = alert_payload(&url, &sample_event()).expect("payload should serialize");
+        let json: Value = serde_json::from_slice(&payload).expect("payload should be json");
+
+        assert_eq!(json["event"], "triggered");
+        assert_eq!(json["rule"]["id"], "cpu-hot");
+        assert!(json.get("msgtype").is_none());
+    }
+
+    fn sample_event() -> AlertEvent {
+        AlertEvent {
+            kind: AlertEventKind::Triggered,
+            occurred_at: Utc::now(),
+            rule: AlertRuleConfig {
+                id: "cpu-hot".to_string(),
+                name: "CPU hot".to_string(),
+                enabled: true,
+                metric: AlertMetric::CpuUsagePercent,
+                comparator: AlertComparator::Gt,
+                threshold: 90,
+                window_minutes: 5,
+                severity: AlertSeverity::Critical,
+                scope_mode: AlertScopeMode::All,
+                node_ids: Vec::new(),
+                tags: Vec::new(),
+                delivery: vec![AlertChannel::Webhook],
+                cooldown_minutes: 30,
+                send_resolved: true,
+            },
+            node_id: "hk-01".to_string(),
+            node_label: "Hong Kong".to_string(),
+            reading: Some(AlertMetricReading {
+                metric: AlertMetric::CpuUsagePercent,
+                value: 91,
+                threshold: 90,
+            }),
+        }
+    }
 }

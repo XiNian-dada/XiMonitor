@@ -10,10 +10,13 @@
 //! 这是 server 内部最大的一段状态机,把它放到独立模块,使 main.rs 只剩
 //! "组装路由 + 启动后台任务"的骨架。
 
+mod browser;
 mod handshake;
 mod protocol;
 mod refresh;
 mod session;
+
+pub use browser::ws_browser_handler;
 
 use std::net::{IpAddr, SocketAddr};
 

@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue';
+import { computed, onMounted, onUnmounted } from 'vue';
 import AppLayout from '@/components/AppLayout.vue';
 import OverviewStats from '@/components/OverviewStats.vue';
+import NodeHealthMatrix from '@/components/NodeHealthMatrix.vue';
 import NodeMap from '@/components/NodeMap.vue';
 import NodeList from '@/components/NodeList.vue';
-import { usePolling } from '@/composables/usePolling';
+import { useWebSocket } from '@/ws';
 import { useBootstrapStore } from '@/stores/bootstrap';
 import { useOverviewStore } from '@/stores/overview';
 import { useNodesStore } from '@/stores/nodes';
@@ -12,22 +13,46 @@ import { useNodesStore } from '@/stores/nodes';
 const bootstrapStore = useBootstrapStore();
 const overviewStore = useOverviewStore();
 const nodesStore = useNodesStore();
+const ws = useWebSocket();
 
 const onlineCount = computed(() => overviewStore.data?.online_nodes ?? 0);
 
 onMounted(() => {
   void bootstrapStore.load();
-});
 
-// One timer drives both refreshes, matching the legacy single refresh()
-// loop. Fixed at the legacy default (5s) for now — bootstrap resolves
-// after setup runs, so honoring a server-configured refresh_interval_secs
-// would need a restart-on-change and is deferred to a follow-up.
-const DEFAULT_REFRESH_MS = 5000;
-usePolling(() => {
-  void overviewStore.refresh();
-  void nodesStore.refresh();
-}, DEFAULT_REFRESH_MS);
+  // WS-first: subscribe to WebSocket messages
+  const offInitial = ws.on('initial_state', (msg) => {
+    overviewStore.apply(msg.overview, msg.generated_at);
+    nodesStore.applyServerState(msg.nodes, msg.generated_at);
+  });
+
+  const offOverview = ws.on('overview_update', (msg) => {
+    overviewStore.apply(msg.overview, msg.generated_at);
+  });
+
+  const offUpsert = ws.on('node_upsert', (msg) => {
+    nodesStore.upsertNode(msg.node, msg.generated_at);
+  });
+
+  const offRemoved = ws.on('node_removed', (msg) => {
+    nodesStore.removeNode(msg.node_id, msg.generated_at);
+  });
+
+  // Fallback: if WS hasn't delivered InitialState within 3s, fetch via REST
+  const fallbackTimer = window.setTimeout(() => {
+    if (!nodesStore.lastGeneratedAt) {
+      void Promise.all([overviewStore.refresh(), nodesStore.refresh()]);
+    }
+  }, 3000);
+
+  onUnmounted(() => {
+    offInitial();
+    offOverview();
+    offUpsert();
+    offRemoved();
+    window.clearTimeout(fallbackTimer);
+  });
+});
 </script>
 
 <template>
@@ -38,8 +63,13 @@ usePolling(() => {
     </template>
 
     <section class="overview" data-test="dashboard-view">
-      <NodeMap />
-      <OverviewStats />
+      <section class="top-row" data-test="dashboard-top-row">
+        <NodeMap />
+        <div class="right-stack">
+          <OverviewStats />
+          <NodeHealthMatrix />
+        </div>
+      </section>
       <NodeList />
     </section>
   </AppLayout>
@@ -47,8 +77,17 @@ usePolling(() => {
 
 <style scoped>
 .overview {
-  display: flex;
-  flex-direction: column;
+  display: block;
+}
+.top-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.right-stack {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 16px;
 }
 .dash-title {
@@ -61,5 +100,10 @@ usePolling(() => {
   margin: 4px 0 0;
   color: var(--text-muted);
   font-size: 13px;
+}
+@media (max-width: 1320px) {
+  .top-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 </style>

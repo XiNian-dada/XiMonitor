@@ -14,6 +14,8 @@ const props = defineProps<{
   series?: MultiSeriesInput[];
   valueKind: ChartValueKind;
   color?: string;
+  maxValue?: number;
+  clipSpikes?: boolean;
 }>();
 
 const emit = defineEmits<{ close: [] }>();
@@ -26,6 +28,8 @@ const chartProps = computed(() => ({
   label: props.title,
   minValue: 0,
   height: 360,
+  clipSpikes: props.clipSpikes ?? true,
+  ...(props.maxValue !== undefined ? { maxValue: props.maxValue } : {}),
   ...(props.points ? { points: props.points } : {}),
   ...(props.series ? { series: props.series } : {}),
 }));

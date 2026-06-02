@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import type { WebhookDraft } from '@/lib/alertsDraft';
 
@@ -10,6 +11,7 @@ import type { WebhookDraft } from '@/lib/alertsDraft';
 const webhook = defineModel<WebhookDraft>({ required: true });
 
 const { t } = useI18n();
+const summary = computed(() => webhook.value.url || t('settings.disabled'));
 </script>
 
 <template>
@@ -22,7 +24,11 @@ const { t } = useI18n();
       </label>
     </header>
 
-    <div class="form">
+    <p v-if="!webhook.enabled" class="collapsed-note" data-test="webhook-collapsed">
+      {{ summary }}
+    </p>
+
+    <div v-else class="form" data-test="webhook-form">
       <label class="field">
         <span>{{ t('alerts.webhook.url') }}</span>
         <input v-model="webhook.url" type="text" data-test="webhook-url" />
@@ -69,6 +75,15 @@ const { t } = useI18n();
   font-size: 14px;
   font-weight: 600;
 }
+.collapsed-note {
+  margin: 0;
+  background: var(--bg-card-soft);
+  border: 1px dashed var(--border-soft);
+  border-radius: 10px;
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 12px;
+}
 .form {
   display: flex;
   flex-direction: column;
@@ -99,5 +114,11 @@ const { t } = useI18n();
   gap: 6px;
   font-size: 13px;
   color: var(--text-secondary);
+}
+@media (max-width: 560px) {
+  .card-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 </style>

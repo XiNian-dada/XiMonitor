@@ -12,10 +12,17 @@ jobs:
   lint-and-test:
     name: Lint and Test
     runs-on: ubuntu-latest
+    needs: [web-lint-and-test]
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Download web dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: nodelite-server/web/dist
 
       - name: Set up Rust
         # 安装最小化的 stable 工具链,并加上 clippy / rustfmt 组件。
@@ -49,9 +56,13 @@ jobs:
 
       - name: Run clippy
         # 使用 --locked + 把所有 warning 当作错误,避免在 CI 中悄悄引入新警告。
+        env:
+          NODELITE_SKIP_WEB_BUILD: 1
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Run tests
+        env:
+          NODELITE_SKIP_WEB_BUILD: 1
         run: cargo test --workspace --locked
 
       - name: Shellcheck installers
@@ -67,10 +78,17 @@ jobs:
   msrv:
     name: MSRV Check
     runs-on: ubuntu-latest
+    needs: [web-lint-and-test]
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Download web dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: nodelite-server/web/dist
 
       - name: Set up Rust MSRV
         run: |
@@ -85,6 +103,8 @@ jobs:
             . -> target
 
       - name: Run tests with MSRV
+        env:
+          NODELITE_SKIP_WEB_BUILD: 1
         run: cargo test --workspace --locked
 
   web-lint-and-test:
@@ -142,10 +162,17 @@ jobs:
             exit 1
           fi
 
+      - name: Upload web dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: nodelite-server/web/dist
+          retention-days: 1
+
   cross-build:
     # 跨平台构建:确保发布前 musl 目标都能编译通过。
     name: Cross Build ${{ matrix.target }}
-    needs: [lint-and-test, msrv]
+    needs: [lint-and-test, msrv, web-lint-and-test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -157,6 +184,12 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Download web dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: nodelite-server/web/dist
 
       - name: Set up Rust
         run: |
@@ -182,6 +215,8 @@ jobs:
           fi
 
       - name: Cross build release binaries
+        env:
+          NODELITE_SKIP_WEB_BUILD: 1
         run: |
           cross build --locked --release --target "${{ matrix.target }}" \
             -p nodelite-server \

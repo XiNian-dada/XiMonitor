@@ -8,7 +8,11 @@ import { makeAlertSettingsView } from '@/api/__fixtures__/nodes';
 import InspectionCard from './InspectionCard.vue';
 
 const FAKE_DICT = {
-  en: { 'alerts.channel.smtp': 'Email', 'alerts.channel.webhook': 'Webhook' },
+  en: {
+    'alerts.channel.smtp': 'Email',
+    'alerts.channel.webhook': 'Webhook',
+    'common.not_available': 'n/a',
+  },
   'zh-CN': {},
 };
 const Stub = defineComponent({ render: () => h('div') });
@@ -52,5 +56,18 @@ describe('InspectionCard', () => {
     const wrapper = mountCard(inspection);
     await wrapper.find('[data-test="delivery-webhook"]').setValue(true);
     expect(inspection.delivery).toEqual(['smtp', 'webhook']);
+  });
+
+  it('collapses details while disabled and expands after enabling', async () => {
+    const inspection = reactive(
+      viewToDraft(makeAlertSettingsView({ inspection: { enabled: false } })).inspection,
+    );
+    const wrapper = mountCard(inspection);
+
+    expect(wrapper.find('[data-test="inspection-collapsed"]').text()).toContain('09:00');
+    expect(wrapper.find('[data-test="inspection-form"]').exists()).toBe(false);
+
+    await wrapper.find('[data-test="inspection-enabled"]').setValue(true);
+    expect(wrapper.find('[data-test="inspection-form"]').exists()).toBe(true);
   });
 });

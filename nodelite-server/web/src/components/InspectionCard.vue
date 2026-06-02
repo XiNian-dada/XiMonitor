@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import type { InspectionSettingsView } from '@/api';
 import DeliveryCheckboxes from './DeliveryCheckboxes.vue';
@@ -7,6 +8,12 @@ import DeliveryCheckboxes from './DeliveryCheckboxes.vue';
 const inspection = defineModel<InspectionSettingsView>({ required: true });
 
 const { t } = useI18n();
+const summary = computed(() => {
+  const delivery = inspection.value.delivery.length
+    ? inspection.value.delivery.map((channel) => t(`alerts.channel.${channel}`)).join(' + ')
+    : t('common.not_available');
+  return `${inspection.value.local_time || '09:00'} · ${inspection.value.lookback_hours || 24}h · ${delivery}`;
+});
 </script>
 
 <template>
@@ -19,7 +26,11 @@ const { t } = useI18n();
       </label>
     </header>
 
-    <div class="form">
+    <p v-if="!inspection.enabled" class="collapsed-note" data-test="inspection-collapsed">
+      {{ summary }}
+    </p>
+
+    <div v-else class="form" data-test="inspection-form">
       <div class="split">
         <label class="field">
           <span>{{ t('alerts.inspection.local_time') }}</span>
@@ -105,6 +116,15 @@ const { t } = useI18n();
   font-size: 14px;
   font-weight: 600;
 }
+.collapsed-note {
+  margin: 0;
+  background: var(--bg-card-soft);
+  border: 1px dashed var(--border-soft);
+  border-radius: 10px;
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 12px;
+}
 .form {
   display: flex;
   flex-direction: column;
@@ -137,5 +157,15 @@ const { t } = useI18n();
   gap: 6px;
   font-size: 13px;
   color: var(--text-secondary);
+}
+@media (max-width: 560px) {
+  .card-head,
+  .split {
+    grid-template-columns: 1fr;
+  }
+  .card-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 </style>

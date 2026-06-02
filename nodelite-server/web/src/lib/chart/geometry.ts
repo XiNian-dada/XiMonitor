@@ -23,10 +23,24 @@ export function chartY(
   return height - padBottom - ((v - bounds.displayMin) / span) * (height - padTop - padBottom);
 }
 
-/** Left padding by metric kind — wider for long rate/latency axis labels. */
-export function chartPadLeft(kind: ChartValueKind): number {
-  if (kind === 'rate') return 86;
-  if (kind === 'latency') return 70;
+/** Left padding by metric kind — compact cards need less whitespace than full-size charts. */
+export function chartPadLeft(kind: ChartValueKind, width?: number): number {
+  const measuredWidth = Number(width);
+  const isCompact = Number.isFinite(measuredWidth) && measuredWidth < 420;
+  const isMedium = Number.isFinite(measuredWidth) && measuredWidth < 520;
+
+  if (kind === 'rate') {
+    if (isCompact) return 62;
+    if (isMedium) return 68;
+    return 78;
+  }
+  if (kind === 'latency') {
+    if (isCompact) return 58;
+    if (isMedium) return 62;
+    return 70;
+  }
+  if (isCompact) return 46;
+  if (isMedium) return 50;
   return 62;
 }
 

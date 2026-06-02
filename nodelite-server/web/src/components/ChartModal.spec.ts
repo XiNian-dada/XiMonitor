@@ -3,6 +3,7 @@ import { mount } from '@vue/test-utils';
 import { createApp, defineComponent, h } from 'vue';
 import { setupI18n, getI18n, __resetI18nForTest } from '@/i18n';
 import type { ChartPoint } from '@/lib/chart/chartData';
+import MetricChart from './MetricChart.vue';
 import ChartModal from './ChartModal.vue';
 
 const FAKE_DICT = { en: { 'node.waiting_history': 'Waiting…' }, 'zh-CN': {} };
@@ -44,5 +45,20 @@ describe('ChartModal', () => {
 
     await wrapper.find('[data-test="chart-modal-close"]').trigger('click');
     expect(wrapper.emitted('close')).toHaveLength(1);
+  });
+
+  it('passes the selected spike clipping state into the chart', () => {
+    const wrapper = mount(ChartModal, {
+      props: {
+        title: 'Network',
+        points: pts([10, 1000]),
+        valueKind: 'rate',
+        color: 'var(--chart-network-down)',
+        clipSpikes: false,
+      },
+      global: { plugins: [getI18n()] },
+    });
+
+    expect(wrapper.findComponent(MetricChart).props('clipSpikes')).toBe(false);
   });
 });

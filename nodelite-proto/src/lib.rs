@@ -26,9 +26,10 @@ pub use config::{
     parse_agent_config, parse_server_config,
 };
 pub use message::{
-    AgentLogEntry, AgentLogsMessage, HelloMessage, MIN_SUPPORTED_WIRE_PROTOCOL_VERSION,
-    MetricsMessage, NoticeLevel, PingMessage, PongMessage, RefreshTokenRequestMessage,
-    RefreshTokenResponseMessage, ServerNoticeMessage, WIRE_PROTOCOL_VERSION, WireMessage,
+    AgentLogEntry, AgentLogsMessage, BrowserMessage, HelloMessage,
+    MIN_SUPPORTED_WIRE_PROTOCOL_VERSION, MetricsMessage, NoticeLevel, PingMessage, PongMessage,
+    RefreshTokenRequestMessage, RefreshTokenResponseMessage, ServerNoticeMessage,
+    WIRE_PROTOCOL_VERSION, WireMessage,
 };
 pub use model::{
     DiskUsage, HistoryPoint, LoadAverage, MemoryUsage, NetworkCounters, NodeIdentity,

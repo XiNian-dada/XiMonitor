@@ -147,6 +147,12 @@ watch([geojson, theme], repaint);
   border-radius: 14px;
   overflow: hidden;
 }
+@media (max-width: 640px) {
+  .map-stage {
+    aspect-ratio: 16 / 10;
+    min-height: 200px;
+  }
+}
 .map-grid {
   position: absolute;
   inset: 0;

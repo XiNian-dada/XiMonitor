@@ -18,14 +18,28 @@ use nodelite_proto::{
 use tracing::warn;
 
 use super::shared::{
-    CpuSample, NetworkSample, NetworkTotals, compute_cpu_usage, compute_network_rates,
+    CpuSample, NetworkRateBaselines, NetworkSample, NetworkTotals, compute_cpu_usage,
+    compute_network_rates,
 };
 
 /// 采集器状态:为了计算 CPU/网络的"差分速率",需要保留上一次的采样值。
 pub struct HostCollector {
     previous_cpu: Option<CpuSample>,
-    previous_network: Option<NetworkSample>,
+    previous_network: Option<ObservedNetworkSample>,
     network_interfaces: NetworkInterfaceCache,
+    network_rate_baselines: NetworkRateBaselines,
+}
+
+#[derive(Debug, Clone)]
+struct ObservedNetworkSample {
+    sample: NetworkSample,
+    signature: NetworkInterfaceSignature,
+}
+
+#[derive(Debug, Clone)]
+struct NetworkReading {
+    totals: NetworkTotals,
+    signature: NetworkInterfaceSignature,
 }
 
 /// macOS 的完整接口列表来自 `NET_RT_IFLIST2`,返回体会随 VPN/虚拟网卡变化。
@@ -34,6 +48,34 @@ pub struct HostCollector {
 struct NetworkInterfaceCache {
     list_len: Option<usize>,
     indices: Vec<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NetworkInterfaceSignature(Vec<String>);
+
+impl NetworkInterfaceSignature {
+    fn empty() -> Self {
+        Self(Vec::new())
+    }
+
+    fn from_indices(indices: &[u16]) -> Self {
+        let mut parts = indices
+            .iter()
+            .map(|index| format!("idx:{index}"))
+            .collect::<Vec<_>>();
+        parts.sort();
+        Self(parts)
+    }
+
+    fn from_names(mut names: Vec<String>) -> Self {
+        names.sort();
+        Self(
+            names
+                .into_iter()
+                .map(|name| format!("name:{name}"))
+                .collect(),
+        )
+    }
 }
 
 #[repr(C)]
@@ -57,6 +99,7 @@ pub fn new_collector() -> HostCollector {
         previous_cpu: None,
         previous_network: None,
         network_interfaces: NetworkInterfaceCache::default(),
+        network_rate_baselines: NetworkRateBaselines::default(),
     }
 }
 
@@ -96,26 +139,50 @@ impl HostCollector {
             .map(|previous| compute_cpu_usage(previous, cpu_sample));
         self.previous_cpu = Some(cpu_sample);
 
-        let network_totals = match collect_network_totals(&mut self.network_interfaces) {
-            Ok(totals) => totals,
+        let network_reading = match collect_network_totals(&mut self.network_interfaces) {
+            Ok(reading) => reading,
             Err(error) => {
                 warn!(error = ?error, "failed to collect macOS network counters; using zeros");
-                NetworkTotals {
-                    rx_bytes: 0,
-                    tx_bytes: 0,
+                NetworkReading {
+                    totals: NetworkTotals {
+                        rx_bytes: 0,
+                        tx_bytes: 0,
+                    },
+                    signature: NetworkInterfaceSignature::empty(),
                 }
             }
         };
         let observed_at = Instant::now();
-        let (rx_bytes_per_sec, tx_bytes_per_sec) = if let Some(previous) = self.previous_network {
-            compute_network_rates(previous, observed_at, network_totals)
+        let network_totals = network_reading.totals;
+        let network_signature = network_reading.signature;
+        let interfaces_changed = self
+            .previous_network
+            .as_ref()
+            .is_some_and(|previous| previous.signature != network_signature);
+        let (rx_bytes_per_sec, tx_bytes_per_sec) = if let Some(previous) = &self.previous_network {
+            compute_network_rates_if_same_interfaces(
+                previous,
+                observed_at,
+                network_totals,
+                &network_signature,
+            )
         } else {
             (None, None)
         };
-        self.previous_network = Some(NetworkSample {
-            observed_at,
-            rx_bytes: network_totals.rx_bytes,
-            tx_bytes: network_totals.tx_bytes,
+        if interfaces_changed {
+            self.network_rate_baselines.clear();
+        }
+        super::log_network_rate_anomalies(
+            self.network_rate_baselines
+                .observe(rx_bytes_per_sec, tx_bytes_per_sec),
+        );
+        self.previous_network = Some(ObservedNetworkSample {
+            sample: NetworkSample {
+                observed_at,
+                rx_bytes: network_totals.rx_bytes,
+                tx_bytes: network_totals.tx_bytes,
+            },
+            signature: network_signature,
         });
 
         let load = match collect_load_average() {
@@ -468,7 +535,7 @@ fn ignored_mount_point(mount_point: &str) -> bool {
     )
 }
 
-fn collect_network_totals(cache: &mut NetworkInterfaceCache) -> Result<NetworkTotals> {
+fn collect_network_totals(cache: &mut NetworkInterfaceCache) -> Result<NetworkReading> {
     collect_network_totals_via_sysctl(cache).or_else(|error| {
         warn!(
             error = ?error,
@@ -479,9 +546,21 @@ fn collect_network_totals(cache: &mut NetworkInterfaceCache) -> Result<NetworkTo
     })
 }
 
+fn compute_network_rates_if_same_interfaces(
+    previous: &ObservedNetworkSample,
+    observed_at: Instant,
+    current: NetworkTotals,
+    current_signature: &NetworkInterfaceSignature,
+) -> (Option<f64>, Option<f64>) {
+    if &previous.signature != current_signature {
+        return (None, None);
+    }
+    compute_network_rates(previous.sample, observed_at, current)
+}
+
 /// 优先用缓存接口 index + `IFMIB_IFDATA` 读取 64-bit 网卡计数。
 /// 接口列表长度变化时再重读完整 `NET_RT_IFLIST2` buffer,刷新缓存。
-fn collect_network_totals_via_sysctl(cache: &mut NetworkInterfaceCache) -> Result<NetworkTotals> {
+fn collect_network_totals_via_sysctl(cache: &mut NetworkInterfaceCache) -> Result<NetworkReading> {
     let mut mib = [libc::CTL_NET, libc::PF_ROUTE, 0, 0, libc::NET_RT_IFLIST2, 0];
     let mut len = 0_usize;
     let size_result = unsafe {
@@ -500,7 +579,12 @@ fn collect_network_totals_via_sysctl(cache: &mut NetworkInterfaceCache) -> Resul
 
     if cache.can_sample_cached_indices(len) {
         match collect_cached_network_totals(cache) {
-            Ok(totals) => return Ok(totals),
+            Ok(totals) => {
+                return Ok(NetworkReading {
+                    totals,
+                    signature: NetworkInterfaceSignature::from_indices(&cache.indices),
+                });
+            }
             Err(error) => {
                 warn!(
                     error = ?error,
@@ -512,9 +596,10 @@ fn collect_network_totals_via_sysctl(cache: &mut NetworkInterfaceCache) -> Resul
     }
 
     let (totals, indices) = collect_network_totals_and_indices_via_iflist2(&mut mib, len)?;
+    let signature = NetworkInterfaceSignature::from_indices(&indices);
     cache.list_len = Some(len);
     cache.indices = indices;
-    Ok(totals)
+    Ok(NetworkReading { totals, signature })
 }
 
 fn collect_network_totals_and_indices_via_iflist2(
@@ -626,7 +711,7 @@ impl NetworkInterfaceCache {
     }
 }
 
-fn collect_network_totals_via_ifaddrs() -> Result<NetworkTotals> {
+fn collect_network_totals_via_ifaddrs() -> Result<NetworkReading> {
     let mut addrs: *mut libc::ifaddrs = ptr::null_mut();
     let result = unsafe { libc::getifaddrs(&mut addrs) };
     if result != 0 || addrs.is_null() {
@@ -635,6 +720,7 @@ fn collect_network_totals_via_ifaddrs() -> Result<NetworkTotals> {
     let _guard = IfAddrsGuard(addrs);
 
     let mut seen_names = HashSet::new();
+    let mut sampled_names = Vec::new();
     let mut rx_bytes = 0_u64;
     let mut tx_bytes = 0_u64;
     let mut current = addrs;
@@ -649,7 +735,8 @@ fn collect_network_totals_via_ifaddrs() -> Result<NetworkTotals> {
             let name = unsafe { CStr::from_ptr(iface.ifa_name) }
                 .to_string_lossy()
                 .into_owned();
-            if seen_names.insert(name) {
+            if seen_names.insert(name.clone()) {
+                sampled_names.push(name);
                 let data = unsafe { &*(iface.ifa_data as *const libc::if_data) };
                 rx_bytes = rx_bytes.saturating_add(u64::from(data.ifi_ibytes));
                 tx_bytes = tx_bytes.saturating_add(u64::from(data.ifi_obytes));
@@ -658,7 +745,10 @@ fn collect_network_totals_via_ifaddrs() -> Result<NetworkTotals> {
         current = iface.ifa_next;
     }
 
-    Ok(NetworkTotals { rx_bytes, tx_bytes })
+    Ok(NetworkReading {
+        totals: NetworkTotals { rx_bytes, tx_bytes },
+        signature: NetworkInterfaceSignature::from_names(sampled_names),
+    })
 }
 
 struct IfAddrsGuard(*mut libc::ifaddrs);
@@ -674,8 +764,9 @@ impl Drop for IfAddrsGuard {
 #[cfg(test)]
 mod tests {
     use super::{
-        NetworkInterfaceCache, compute_available_memory_bytes, compute_network_rates,
-        extract_plist_value,
+        NetworkInterfaceCache, NetworkInterfaceSignature, ObservedNetworkSample,
+        compute_available_memory_bytes, compute_network_rates,
+        compute_network_rates_if_same_interfaces, extract_plist_value,
     };
     use std::time::{Duration, Instant};
 
@@ -715,6 +806,44 @@ mod tests {
         let (rx_rate, tx_rate) = compute_network_rates(previous, Instant::now(), current);
         assert!(rx_rate.unwrap() > 50.0);
         assert!(tx_rate.unwrap() > 20.0);
+    }
+
+    #[test]
+    fn skips_network_rates_when_interface_signature_changes() {
+        let previous = ObservedNetworkSample {
+            sample: super::NetworkSample {
+                observed_at: Instant::now() - Duration::from_secs(2),
+                rx_bytes: 100,
+                tx_bytes: 40,
+            },
+            signature: NetworkInterfaceSignature::from_indices(&[4]),
+        };
+        let current = super::NetworkTotals {
+            rx_bytes: 10_000_000_000,
+            tx_bytes: 4_000_000_000,
+        };
+
+        let (rx_rate, tx_rate) = compute_network_rates_if_same_interfaces(
+            &previous,
+            Instant::now(),
+            current,
+            &NetworkInterfaceSignature::from_indices(&[4, 5]),
+        );
+
+        assert_eq!(rx_rate, None);
+        assert_eq!(tx_rate, None);
+    }
+
+    #[test]
+    fn network_interface_signature_order_is_stable() {
+        assert_eq!(
+            NetworkInterfaceSignature::from_indices(&[5, 4]),
+            NetworkInterfaceSignature::from_indices(&[4, 5]),
+        );
+        assert_ne!(
+            NetworkInterfaceSignature::from_indices(&[4]),
+            NetworkInterfaceSignature::from_indices(&[4, 5]),
+        );
     }
 
     #[test]

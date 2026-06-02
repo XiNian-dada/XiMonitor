@@ -17,7 +17,7 @@ import { chartPadLeft, chartY, smoothPath } from './geometry';
 
 const PAD_RIGHT = 14;
 const PAD_TOP = 12;
-const PAD_BOTTOM = 20;
+const PAD_BOTTOM = 32;
 
 export interface HoverPoint {
   x: number;
@@ -29,6 +29,11 @@ export interface HoverPoint {
 export interface ChartGridLine {
   y: number;
   label: string;
+}
+
+export interface ChartTimeTick {
+  x: number;
+  ts: number;
 }
 
 export interface ChartSeriesModel {
@@ -52,6 +57,7 @@ export interface ChartModel {
   padTop: number;
   padBottom: number;
   grid: ChartGridLine[];
+  timeTicks: ChartTimeTick[];
   series: ChartSeriesModel[];
   /** True when there's no numeric data to plot (render a placeholder). */
   empty: boolean;
@@ -113,14 +119,45 @@ function emptyModel(opts: ChartOptions, padLeft: number): ChartModel {
     padTop: PAD_TOP,
     padBottom: PAD_BOTTOM,
     grid: [],
+    timeTicks: [],
     series: [],
     empty: true,
   };
 }
 
+function buildTimeTicks(points: HoverPoint[], width: number, padLeft: number): ChartTimeTick[] {
+  const withTime = points.filter((p) => p.ts != null);
+  if (withTime.length === 0) return [];
+
+  const plotWidth = Math.max(1, width - padLeft - PAD_RIGHT);
+  const targetSpacing = 140;
+  const tickCount = Math.min(8, Math.max(2, Math.round(plotWidth / targetSpacing) + 1));
+  const lastIdx = withTime.length - 1;
+  const ticks: ChartTimeTick[] = [];
+  const seen = new Set<number>();
+
+  for (let i = 0; i < tickCount; i += 1) {
+    const ratio = tickCount === 1 ? 0 : i / (tickCount - 1);
+    const idx = Math.round(ratio * lastIdx);
+    const point = withTime[idx];
+    if (!point || point.ts == null || seen.has(point.ts)) continue;
+    seen.add(point.ts);
+    ticks.push({ x: point.x, ts: point.ts });
+  }
+
+  return ticks;
+}
+
+function longestTimedSeries(series: ChartSeriesModel[]): HoverPoint[] {
+  return series.reduce<HoverPoint[]>((best, current) => {
+    const timed = current.points.filter((p) => p.ts != null);
+    return timed.length > best.length ? timed : best;
+  }, []);
+}
+
 export function buildAreaChart(points: ChartPoint[], opts: AreaChartOptions): ChartModel {
   const kind = opts.valueKind ?? 'number';
-  const padLeft = opts.padLeft ?? chartPadLeft(kind);
+  const padLeft = opts.padLeft ?? chartPadLeft(kind, opts.width);
   const numeric = (points ?? []).filter(isFiniteValue);
   if (numeric.length === 0) return emptyModel(opts, padLeft);
 
@@ -147,6 +184,7 @@ export function buildAreaChart(points: ChartPoint[], opts: AreaChartOptions): Ch
     padTop: PAD_TOP,
     padBottom: PAD_BOTTOM,
     grid: buildGrid(bounds, height, kind),
+    timeTicks: buildTimeTicks(coords, width, padLeft),
     series: [
       {
         label: opts.label ?? '',
@@ -165,7 +203,7 @@ export function buildAreaChart(points: ChartPoint[], opts: AreaChartOptions): Ch
 
 export function buildMultiAreaChart(series: MultiSeriesInput[], opts: ChartOptions): ChartModel {
   const kind = opts.valueKind ?? 'number';
-  const padLeft = opts.padLeft ?? chartPadLeft(kind);
+  const padLeft = opts.padLeft ?? chartPadLeft(kind, opts.width);
   const valid = (series ?? []).filter((s) => Array.isArray(s.points) && s.points.length > 0);
   if (valid.length === 0) return emptyModel(opts, padLeft);
 
@@ -200,6 +238,8 @@ export function buildMultiAreaChart(series: MultiSeriesInput[], opts: ChartOptio
     };
   });
 
+  const timeTicks = buildTimeTicks(longestTimedSeries(built), width, padLeft);
+
   return {
     width,
     height,
@@ -208,6 +248,7 @@ export function buildMultiAreaChart(series: MultiSeriesInput[], opts: ChartOptio
     padTop: PAD_TOP,
     padBottom: PAD_BOTTOM,
     grid: buildGrid(bounds, height, kind),
+    timeTicks,
     series: built,
     empty: false,
   };

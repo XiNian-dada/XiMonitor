@@ -16,7 +16,8 @@ use nodelite_proto::{
 use tracing::warn;
 
 use super::shared::{
-    CpuSample, NetworkSample, NetworkTotals, compute_cpu_usage, compute_network_rates,
+    CpuSample, NetworkRateBaselines, NetworkSample, NetworkTotals, compute_cpu_usage,
+    compute_network_rates,
 };
 
 /// `statvfs` 探测函数的签名。生产环境指向真正的 libc 系统调用,
@@ -28,6 +29,7 @@ pub struct HostCollector {
     sys_root: std::path::PathBuf,
     previous_cpu: Option<CpuSample>,
     previous_network: Option<NetworkSample>,
+    network_rate_baselines: NetworkRateBaselines,
     /// 磁盘容量探测函数。默认是真实的 `statvfs` 系统调用,测试可通过
     /// [`HostCollector::with_statvfs`] 注入桩实现。
     statvfs: StatvfsFn,
@@ -38,6 +40,7 @@ pub fn new_collector() -> HostCollector {
         sys_root: std::path::PathBuf::from("/"),
         previous_cpu: None,
         previous_network: None,
+        network_rate_baselines: NetworkRateBaselines::default(),
         statvfs: real_statvfs,
     }
 }
@@ -49,6 +52,7 @@ impl HostCollector {
             sys_root,
             previous_cpu: None,
             previous_network: None,
+            network_rate_baselines: NetworkRateBaselines::default(),
             statvfs: real_statvfs,
         }
     }
@@ -122,6 +126,10 @@ impl HostCollector {
             rx_bytes: network_totals.rx_bytes,
             tx_bytes: network_totals.tx_bytes,
         });
+        super::log_network_rate_anomalies(
+            self.network_rate_baselines
+                .observe(rx_bytes_per_sec, tx_bytes_per_sec),
+        );
 
         let loadavg_path = self.sys_root.join("proc/loadavg");
         let load = parse_load_average(
