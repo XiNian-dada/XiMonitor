@@ -18,7 +18,8 @@ use nodelite_proto::{
 use tracing::warn;
 
 use super::shared::{
-    CpuSample, NetworkSample, NetworkTotals, compute_cpu_usage, compute_network_rates,
+    CpuSample, NetworkRateBaselines, NetworkSample, NetworkTotals, compute_cpu_usage,
+    compute_network_rates,
 };
 
 /// 采集器状态:为了计算 CPU/网络的"差分速率",需要保留上一次的采样值。
@@ -26,6 +27,7 @@ pub struct HostCollector {
     previous_cpu: Option<CpuSample>,
     previous_network: Option<ObservedNetworkSample>,
     network_interfaces: NetworkInterfaceCache,
+    network_rate_baselines: NetworkRateBaselines,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +99,7 @@ pub fn new_collector() -> HostCollector {
         previous_cpu: None,
         previous_network: None,
         network_interfaces: NetworkInterfaceCache::default(),
+        network_rate_baselines: NetworkRateBaselines::default(),
     }
 }
 
@@ -152,6 +155,10 @@ impl HostCollector {
         let observed_at = Instant::now();
         let network_totals = network_reading.totals;
         let network_signature = network_reading.signature;
+        let interfaces_changed = self
+            .previous_network
+            .as_ref()
+            .is_some_and(|previous| previous.signature != network_signature);
         let (rx_bytes_per_sec, tx_bytes_per_sec) = if let Some(previous) = &self.previous_network {
             compute_network_rates_if_same_interfaces(
                 previous,
@@ -162,6 +169,13 @@ impl HostCollector {
         } else {
             (None, None)
         };
+        if interfaces_changed {
+            self.network_rate_baselines.clear();
+        }
+        super::log_network_rate_anomalies(
+            self.network_rate_baselines
+                .observe(rx_bytes_per_sec, tx_bytes_per_sec),
+        );
         self.previous_network = Some(ObservedNetworkSample {
             sample: NetworkSample {
                 observed_at,

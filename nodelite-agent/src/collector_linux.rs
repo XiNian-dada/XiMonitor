@@ -16,19 +16,22 @@ use nodelite_proto::{
 use tracing::warn;
 
 use super::shared::{
-    CpuSample, NetworkSample, NetworkTotals, compute_cpu_usage, compute_network_rates,
+    CpuSample, NetworkRateBaselines, NetworkSample, NetworkTotals, compute_cpu_usage,
+    compute_network_rates,
 };
 
 /// 采集器状态:为了计算 CPU/网络的"差分速率",需要保留上一次的采样值。
 pub struct HostCollector {
     previous_cpu: Option<CpuSample>,
     previous_network: Option<NetworkSample>,
+    network_rate_baselines: NetworkRateBaselines,
 }
 
 pub fn new_collector() -> HostCollector {
     HostCollector {
         previous_cpu: None,
         previous_network: None,
+        network_rate_baselines: NetworkRateBaselines::default(),
     }
 }
 
@@ -87,6 +90,10 @@ impl HostCollector {
             rx_bytes: network_totals.rx_bytes,
             tx_bytes: network_totals.tx_bytes,
         });
+        super::log_network_rate_anomalies(
+            self.network_rate_baselines
+                .observe(rx_bytes_per_sec, tx_bytes_per_sec),
+        );
 
         let load = parse_load_average(
             &fs::read_to_string("/proc/loadavg").context("read /proc/loadavg")?,
