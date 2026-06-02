@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, warn};
 
-use super::NewAuditEvent;
+use super::types::NewAuditEvent;
 
 const AUDIT_BATCH_MAX: usize = 128;
 const AUDIT_BATCH_FLUSH_INTERVAL: Duration = Duration::from_millis(100);

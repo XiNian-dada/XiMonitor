@@ -111,7 +111,7 @@ mod tests {
     use chrono::{Duration, Utc};
     use rusqlite::Connection;
 
-    use super::*;
+    use super::{super::storage::AUDIT_TABLE_SQL, *};
 
     #[test]
     fn default_audit_query_uses_timestamp_order_fast_path() {
@@ -181,7 +181,7 @@ mod tests {
     fn explain_plan(audit_sql: &AuditSql) -> String {
         let connection = Connection::open_in_memory().expect("in-memory audit db should open");
         connection
-            .execute_batch(super::super::AUDIT_TABLE_SQL)
+            .execute_batch(AUDIT_TABLE_SQL)
             .expect("audit schema should initialize");
 
         let explain_sql = format!("EXPLAIN QUERY PLAN {}", audit_sql.sql);
