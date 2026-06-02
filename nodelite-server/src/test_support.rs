@@ -134,7 +134,9 @@ pub struct TestNode {
 }
 
 pub struct TestServer {
-    addr: SocketAddr,
+    /// 绑定的本地地址。集成测试(如 e2e)需要据此拼出 Agent 连接用的 `ws://` URL,
+    /// 因此放开到 crate 可见;`test_support` 整体受 `#[cfg(test)]` 门控,不进入公开 API。
+    pub(crate) addr: SocketAddr,
     registry: NodeRegistry,
     registry_path: PathBuf,
     shared: SharedState,

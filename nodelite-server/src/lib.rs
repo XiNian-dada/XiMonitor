@@ -26,7 +26,10 @@ mod history;
 #[cfg(test)]
 #[path = "../tests/integration/mod.rs"]
 mod integration_tests;
-#[cfg(any(test, feature = "load_test"))]
+// 压测模块全部由 `#[tokio::test]` 组成,只在 `cfg(test)` 下编译;`load_test` 特性仅用于
+// 取消这些用例的 `#[ignore]`(见各用例上的 `cfg_attr`),因此模块本身无需随特性编译——
+// 否则 `--all-features` 的非测试(lib)构建会把依赖 dev-dependency 的压测代码也拉进来而编译失败。
+#[cfg(test)]
 mod load_test;
 mod qr;
 mod registry;

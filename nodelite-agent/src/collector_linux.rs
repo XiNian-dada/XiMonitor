@@ -112,9 +112,8 @@ impl HostCollector {
         self.previous_cpu = Some(cpu_sample);
 
         let dev_path = self.sys_root.join("proc/net/dev");
-        let network_totals = parse_network_totals(
-            &fs::read_to_string(&dev_path).context("read /proc/net/dev")?,
-        )?;
+        let network_totals =
+            parse_network_totals(&fs::read_to_string(&dev_path).context("read /proc/net/dev")?)?;
         let observed_at = Instant::now();
         let (rx_bytes_per_sec, tx_bytes_per_sec) = if let Some(previous) = self.previous_network {
             compute_network_rates(previous, observed_at, network_totals)
@@ -132,13 +131,11 @@ impl HostCollector {
         );
 
         let loadavg_path = self.sys_root.join("proc/loadavg");
-        let load = parse_load_average(
-            &fs::read_to_string(&loadavg_path).context("read /proc/loadavg")?,
-        )?;
+        let load =
+            parse_load_average(&fs::read_to_string(&loadavg_path).context("read /proc/loadavg")?)?;
         let meminfo_path = self.sys_root.join("proc/meminfo");
-        let memory = parse_memory_usage(
-            &fs::read_to_string(&meminfo_path).context("read /proc/meminfo")?,
-        )?;
+        let memory =
+            parse_memory_usage(&fs::read_to_string(&meminfo_path).context("read /proc/meminfo")?)?;
         let uptime_path = self.sys_root.join("proc/uptime");
         let uptime_secs = read_uptime(&uptime_path)?;
         let mounts_path = self.sys_root.join("proc/mounts");
@@ -397,7 +394,8 @@ fn parse_network_line_counters(counters: &str, iface: &str) -> Result<(u64, u64)
 ///
 /// `statvfs_fn` 由调用方注入,生产环境是真实系统调用,测试时为桩实现。
 fn collect_disks(mounts_path: &std::path::Path, statvfs_fn: StatvfsFn) -> Result<Vec<DiskUsage>> {
-    let content = fs::read_to_string(mounts_path).with_context(|| format!("read {}", mounts_path.display()))?;
+    let content = fs::read_to_string(mounts_path)
+        .with_context(|| format!("read {}", mounts_path.display()))?;
     let mut seen_mounts = HashSet::new();
     let mut seen_devices = HashSet::new();
     let mut disks = Vec::new();
@@ -571,8 +569,8 @@ mod tests {
 
     #[test]
     fn parses_cpu_sample_and_usage() {
-        let previous =
-            parse_cpu_sample("cpu  100 0 50 400 10 0 0 0 0 0\n").expect("parse previous cpu sample");
+        let previous = parse_cpu_sample("cpu  100 0 50 400 10 0 0 0 0 0\n")
+            .expect("parse previous cpu sample");
         let current =
             parse_cpu_sample("cpu  160 0 70 430 20 0 0 0 0 0\n").expect("parse current cpu sample");
         let usage = compute_cpu_usage(previous, current);
@@ -631,8 +629,11 @@ mod tests {
             .expect("write mock proc/uptime");
         std::fs::write(root.join("proc/sys/kernel/hostname"), "mock-host\n")
             .expect("write mock hostname");
-        std::fs::write(root.join("etc/os-release"), "PRETTY_NAME=\"Mock Linux OS\"\n")
-            .expect("write mock os-release");
+        std::fs::write(
+            root.join("etc/os-release"),
+            "PRETTY_NAME=\"Mock Linux OS\"\n",
+        )
+        .expect("write mock os-release");
         std::fs::write(root.join("proc/sys/kernel/osrelease"), "6.8.0-mock\n")
             .expect("write mock osrelease");
         std::fs::write(

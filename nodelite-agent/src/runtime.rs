@@ -58,7 +58,15 @@ pub async fn run() -> Result<()> {
         config.server.clone(),
         config.insecure_transport_warn_interval_secs,
     );
-    run_forever(config, collector, identity, cli.config, log_buffer, shutdown_signal()).await
+    run_forever(
+        config,
+        collector,
+        identity,
+        cli.config,
+        log_buffer,
+        shutdown_signal(),
+    )
+    .await
 }
 
 fn run_sample_once(

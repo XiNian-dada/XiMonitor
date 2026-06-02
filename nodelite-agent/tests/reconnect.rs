@@ -47,7 +47,7 @@ fn test_identity(config: &AgentConfig) -> NodeIdentity {
 
 /// 验证认证前断连后的首次退避确实落在 `reconnect_delay(0)` 的 [1s, 5s] 窗口内:
 /// 推进不足 1s 不得重连;推进越过 5s 必须重连。
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn test_agent_reconnect_backoff_with_mock_time() -> Result<()> {
     // 暂停时钟,用虚拟时间精确控制退避计时。
     tokio::time::pause();
@@ -107,10 +107,8 @@ async fn test_agent_reconnect_backoff_with_mock_time() -> Result<()> {
 
 /// 验证 token 过期走的是独立的长退避路径(首次 30s),而非常规的 1–5s:
 /// 在常规退避早已到期的 6s 处不得重连,推进越过 30s 后才重连。
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn test_agent_token_expired_uses_long_backoff() -> Result<()> {
-    tokio::time::pause();
-
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let local_addr = listener.local_addr()?;
     let temp_dir = TempDir::new("nodelite-agent-token-expired-test");
@@ -143,8 +141,10 @@ async fn test_agent_token_expired_uses_long_backoff() -> Result<()> {
     };
     serve_token_expired_notice(stream1).await?;
 
-    // 让 Agent 处理通知并 park 到 30s 退避计时器上。
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // 至此 Agent 已读到通知、返回 token 过期错误并断开连接,即将进入 30s 独立退避。
+    // 现在才暂停时钟:握手 + 通知必须在真实时间下完成,否则 `tokio::time::pause()` 的自动
+    // 推进会与真实 WebSocket 握手 I/O 抢跑(Windows IOCP 上尤甚),把 connect 超时打断。
+    tokio::time::pause();
 
     // 常规退避(≤5s)在 6s 内必定重连;token 过期路径要等 30s,因此此处不得重连。
     let mut accept_fut = Box::pin(listener.accept());
@@ -164,8 +164,8 @@ async fn test_agent_token_expired_uses_long_backoff() -> Result<()> {
     Ok(())
 }
 
-/// 在已建立的 TCP 连接上完成 WebSocket 握手,读取 Agent 的 Hello,
-/// 然后回送一条 `token expired` 错误通知。返回时关闭 socket。
+/// 在已建立的 TCP 连接上完成 WebSocket 握手,读取 Agent 的 Hello,然后回送一条
+/// `token expired` 错误通知,并等待 Agent 因 token 过期而主动断开后返回。
 async fn serve_token_expired_notice(stream: TcpStream) -> Result<()> {
     let mut ws = accept_async(stream)
         .await
@@ -184,6 +184,13 @@ async fn serve_token_expired_notice(stream: TcpStream) -> Result<()> {
     ws.send(Message::Text(payload.into()))
         .await
         .map_err(|error| anyhow!("send notice failed: {error}"))?;
-    let _ = ws.close(None).await;
+    // 同步点:Agent 读到 "token expired" 会立即返回错误并断开连接。读取直到流结束,确保
+    // 返回时 Agent 确已处理完通知、进入退避路径,而不是仍卡在握手/读取的 I/O 上——这样
+    // 调用方随后切到虚拟时间(pause)就不会再和真实 I/O 抢跑。
+    while let Some(frame) = ws.next().await {
+        if matches!(frame, Ok(Message::Close(_)) | Err(_)) {
+            break;
+        }
+    }
     Ok(())
 }

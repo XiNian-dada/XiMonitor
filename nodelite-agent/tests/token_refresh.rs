@@ -102,9 +102,7 @@ report_interval_secs = 5
 
     // Spawn mock server in the background
     let server_token = expected_new_token.clone();
-    let server_task = tokio::spawn(async move {
-        run_mock_server(listener, server_token).await
-    });
+    let server_task = tokio::spawn(async move { run_mock_server(listener, server_token).await });
 
     let mut collector = new_collector();
     let identity = nodelite_proto::NodeIdentity {
@@ -138,8 +136,8 @@ report_interval_secs = 5
     // Check that run_session completed and returned the expected connection closure error
     let session_res = result.context("Session timed out")?;
     assert!(session_res.is_err());
-    let session_err =
-        session_res.expect_err("session should end with an error when the server closes the socket");
+    let session_err = session_res
+        .expect_err("session should end with an error when the server closes the socket");
     assert!(session_err.established_session);
 
     // Verify token was updated in config file
